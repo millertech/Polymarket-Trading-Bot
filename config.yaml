@@ -118,6 +118,17 @@ wallets:
       max_open_trades: 50
       max_drawdown: 0.10
 
+  - id: paper_copy_trade
+    mode: PAPER
+    strategy: copy_trade
+    capital: 10000
+    risk_limits:
+      max_position_size: 500
+      max_exposure_per_market: 500
+      max_daily_loss: 500
+      max_open_trades: 30
+      max_drawdown: 0.15
+
 strategy_config:
   cross_market_arbitrage:
     min_edge: 0.03
@@ -162,6 +173,46 @@ strategy_config:
     max_total_mle_pct: 0.15
     max_orders_per_minute: 10
     max_cancel_rate: 0.5
+
+  # ── Copy Trading Strategy ──────────────────────────────────────────
+  copy_trade:
+    # Whale addresses to follow (add Polymarket proxy wallet addresses)
+    whale_addresses: []
+    # 'mirror' = same direction as whale, 'inverse' = contrarian
+    copy_mode: mirror
+    data_api_url: https://data-api.polymarket.com
+    # ── Polling ──
+    poll_interval_seconds: 30
+    max_trade_age_seconds: 120
+    # ── Whale Filters ──
+    min_trade_size_usd: 50
+    max_trade_size_usd: 100000
+    min_whale_win_rate: 0.50
+    # ── Position Sizing ──
+    size_mode: fixed                    # fixed | proportional | kelly
+    fixed_size: 10
+    proportional_factor: 0.10          # when size_mode = proportional
+    max_capital_per_trade_pct: 0.05
+    max_shares_per_order: 50
+    # ── Risk / Exposure ──
+    max_open_positions: 15
+    max_exposure_per_market_usd: 500
+    max_daily_volume_usd: 5000
+    max_drawdown_pct: 0.15
+    max_consecutive_losses: 5
+    cooldown_after_loss_seconds: 300
+    # ── Exit Parameters ──
+    take_profit_bps: 150
+    stop_loss_bps: 100
+    trailing_stop_activate_bps: 80
+    trailing_stop_distance_bps: 30
+    time_exit_minutes: 120
+    exit_on_whale_exit: true
+    # ── Filters ──
+    blacklist_markets: []
+    whitelist_markets: []
+    min_market_liquidity: 500
+    min_market_volume_24h: 1000
 
 polymarket:
   gamma_api: https://gamma-api.polymarket.com

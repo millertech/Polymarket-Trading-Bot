@@ -17,7 +17,7 @@
 
 <br/>
 
-<img src="docs/screenshots/dashboard.png" alt="Polymarket Trading Bot Dashboard — Real-time P&L tracking, 10 wallets, 7 strategies, whale scanner" width="100%" />
+<img src="docs/screenshots/dashboard.png" alt="Polymarket Trading Bot Dashboard — Real-time P&L tracking, 10 wallets, 8 strategies, whale scanner" width="100%" />
 
 *Real-time dashboard showing 10 active wallets, $72,800 total capital, $39,240 total P&L, and 7 concurrent strategies running in paper trading mode.*
 
@@ -46,7 +46,7 @@ The platform includes an enterprise-level **whale tracking engine** that auto-di
 
 ## ✨ Features
 
-### 🧠 7 Built-In Trading Strategies
+### 🧠 8 Built-In Trading Strategies
 
 | # | Strategy | Type | Description | Edge |
 |---|----------|------|-------------|------|
@@ -56,7 +56,8 @@ The platform includes an enterprise-level **whale tracking engine** that auto-di
 | 4 | **Market Making (Spread)** | Market Making | Provides liquidity by quoting both sides of the book | 40 bps spread capture |
 | 5 | **Momentum** | Trend Following | Rides short-term price trends with 15-min lookback | Trend continuation |
 | 6 | **AI Forecast** | Research/AI | ML-driven predictions with web research pipeline | Data-driven alpha |
-| 7 | **User-Defined** | Custom | Your own strategy — extend the base class | Unlimited |
+| 7 | **Copy Trading** | Whale Mirroring | Mirrors whale trades in real-time with full risk management | Whale alpha extraction |
+| 8 | **User-Defined** | Custom | Your own strategy — extend the base class | Unlimited |
 
 ### 🐋 Whale Tracking & Copy Trading
 
@@ -146,7 +147,7 @@ npm start
 node dist/cli.js start --config config.yaml
 ```
 
-The bot will start all 10 wallets (7 strategies), launch the whale scanner, and serve the dashboard at:
+The bot will start all 10 wallets (8 strategies), launch the whale scanner, and serve the dashboard at:
 
 > **🌐 Dashboard: [http://localhost:3000/dashboard](http://localhost:3000/dashboard)**
 
@@ -246,7 +247,38 @@ strategy_config:
     refresh_minutes: 30  # Re-analyze every 30 minutes
 ```
 
-### 7. User-Defined Strategy
+### 7. Copy Trading
+
+Mirrors trades from configured whale addresses in near-real-time with comprehensive risk management. Supports multiple whales, three sizing modes, and automatic exit when the whale closes their position.
+
+**Key Features:**
+- **Multi-whale following** — Track any number of wallet addresses simultaneously
+- **Mirror / Inverse modes** — Copy whales directly or trade against them (contrarian)
+- **3 sizing modes** — Fixed size, proportional to whale's trade, or half-Kelly
+- **Full exit management** — Take profit, stop loss, trailing stop, time exit, whale-exit mirroring
+- **Per-whale performance tracking** — Win rate, P&L, and consecutive loss cooldowns
+- **Drawdown circuit breaker** — Auto-pauses copy trading when drawdown limit hit
+- **Daily volume caps** — Prevents over-exposure from high-frequency whales
+- **Market blacklist/whitelist** — Fine-grained control over which markets to copy
+
+```yaml
+strategy_config:
+  copy_trade:
+    whale_addresses:
+      - "0xYourWhaleAddressHere"
+    copy_mode: mirror              # mirror | inverse
+    size_mode: fixed               # fixed | proportional | kelly
+    fixed_size: 10
+    max_open_positions: 15
+    take_profit_bps: 150
+    stop_loss_bps: 100
+    trailing_stop_activate_bps: 80
+    exit_on_whale_exit: true
+    max_drawdown_pct: 0.15
+    max_daily_volume_usd: 5000
+```
+
+### 8. User-Defined Strategy
 
 A template for building your own custom strategy. Extend the `BaseStrategy` class:
 
@@ -342,7 +374,7 @@ The dashboard is served as a single-page app at `http://localhost:3000/dashboard
 |---------|-------------|
 | **📈 Overview** | Engine status, total P&L, active wallets, market count |
 | **💼 Wallets** | 10 wallet cards with strategy, capital, P&L, positions, trades |
-| **🧠 Strategy Library** | Browse all 7 strategies, view details, create wallets |
+| **🧠 Strategy Library** | Browse all 8 strategies, view details, create wallets |
 | **📋 Trade Feed** | Live stream of all BUY/SELL signals across wallets |
 | **🔍 Market Scanner** | Currently analyzed markets with prices and volume |
 | **🐋 Whale Tracker** | Full whale tracking panel with 6 sub-tabs |
@@ -462,11 +494,12 @@ src/
 │   ├── engine.ts            # Main orchestrator
 │   ├── config_loader.ts     # YAML config parser
 │   └── scheduler.ts         # Strategy scheduling loop
-├── strategies/              # 7 pluggable strategies
+├── strategies/              # 8 pluggable strategies
 │   ├── strategy_interface.ts
 │   ├── registry.ts
 │   ├── arbitrage/           # Cross-market & mispricing
 │   ├── convergence/         # High-probability convergence
+│   ├── copy_trading/        # Whale copy trading
 │   ├── market_making/       # Spread capture
 │   ├── trend/               # Momentum following
 │   ├── research_ai/         # AI + web research
@@ -615,6 +648,6 @@ If you find this project useful, please ⭐ star the repo — it helps others di
 
 **Built with ❤️ for the Polymarket community**
 
-*50 source files · 53,776 lines of code · 106 tests · 7 strategies · 1 mission: automate alpha*
+*51 source files · 21,000+ lines of code · 144 tests · 8 strategies · 1 mission: automate alpha*
 
 </div>
