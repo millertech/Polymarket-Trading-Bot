@@ -15,6 +15,12 @@
 
 [Features](#-features) · [Quick Start](#-quick-start) · [Strategies](#-strategies) · [Whale Scanner](#-whale-tracking--scanner) · [Dashboard](#-real-time-dashboard) · [Configuration](#%EF%B8%8F-configuration) · [API Reference](#-api-endpoints) · [Custom Development](#-custom-bot-development)
 
+<br/>
+
+<img src="docs/screenshots/dashboard.png" alt="Polymarket Trading Bot Dashboard — Real-time P&L tracking, 10 wallets, 7 strategies, whale scanner" width="100%" />
+
+*Real-time dashboard showing 10 active wallets, $72,800 total capital, $39,240 total P&L, and 7 concurrent strategies running in paper trading mode.*
+
 </div>
 
 ---
