@@ -44,6 +44,9 @@ The platform includes an enterprise-level **whale tracking engine** that auto-di
 
 ---
 
+**VIEW MY PORTFOLIO OF BOTS I CAN DEVELOP:** https://github.com/dylanpersonguy/polymarket-trading-bot-developer
+
+
 ## ✨ Features
 
 ### 🧠 8 Built-In Trading Strategies
@@ -620,6 +623,9 @@ docker run -p 3000:3000 -e ENABLE_LIVE_TRADING=true polymarket-bot
 **Want a custom trading bot tailored to your strategy?**
 
 I build custom automated trading bots for prediction markets, crypto, and forex. Whether you need modifications to this platform or an entirely new system, I can help.
+
+
+**VIEW MY PORTFOLIO OF BOTS I CAN DEVELOP:** https://github.com/dylanpersonguy/polymarket-trading-bot-developer
 
 📱 **Contact: [@DylanForexia on Telegram](https://t.me/DylanForexia)**
 
