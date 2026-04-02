@@ -5,6 +5,7 @@ import { logger } from '../reporting/logs';
 import { consoleLog } from '../reporting/console_log';
 
 export class PaperWallet {
+  private static readonly MAX_TRADE_HISTORY = 10_000;
   private state: WalletState;
   private readonly fillSimulator = new FillSimulator();
   private readonly pnlTracker = new PnlTracker();
@@ -98,6 +99,10 @@ export class PaperWallet {
       balanceAfter: this.state.availableBalance,
       timestamp: fill.timestamp,
     });
+
+    if (this.trades.length > PaperWallet.MAX_TRADE_HISTORY) {
+      this.trades.splice(0, this.trades.length - PaperWallet.MAX_TRADE_HISTORY);
+    }
 
     logger.info(
       {

@@ -102,4 +102,11 @@ export class RiskEngine {
       0,
     );
   }
+
+  /** Clean up tracking data for a removed wallet */
+  removeWallet(walletId: string): void {
+    this.orderTimestamps.delete(walletId);
+    this.cancelCounts.delete(walletId);
+    this.walletMle.delete(walletId);
+  }
 }

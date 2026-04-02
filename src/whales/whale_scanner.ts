@@ -394,6 +394,12 @@ class ApiPool {
 }
 
 export class WhaleScanner {
+  private static readonly MAX_GLOBAL_AGG = 50_000;
+  private static readonly MAX_SEEN_TRADE_HASHES = 500_000;
+  private static readonly MAX_CLUSTER_SIGNALS = 1_000;
+  private static readonly MAX_BIG_TRADE_ADDRESSES = 10_000;
+  private static readonly MAX_COPY_SIM_RESULTS = 5_000;
+
   private db: WhaleDB;
   private config: WhaleTrackingConfig;
   private scannerConfig: ScannerConfig;
@@ -937,6 +943,8 @@ export class WhaleScanner {
       if (pruned > 0) {
         logger.info({ pruned, remaining: this.persistentMarketSeen.size }, 'Scanner: pruned persistent market cache');
       }
+
+      this.pruneMemory();
     } catch (err) {
       this.state.status = this.state.enabled ? 'scanning' : 'error';
       this.state.lastError = err instanceof Error ? err.message : String(err);
@@ -955,6 +963,49 @@ export class WhaleScanner {
     this.state.qualifiedCount = profiles.filter(
       (p) => p.compositeScore >= this.scannerConfig.autoPromoteMinScore,
     ).length;
+  }
+
+  /** Evict oldest entries from unbounded in-memory structures to prevent OOM */
+  private pruneMemory(): void {
+    // globalAgg: keep top addresses by trade count
+    if (this.globalAgg.size > WhaleScanner.MAX_GLOBAL_AGG) {
+      const sorted = [...this.globalAgg.entries()]
+        .sort((a, b) => b[1].trades - a[1].trades)
+        .slice(0, WhaleScanner.MAX_GLOBAL_AGG);
+      this.globalAgg = new Map(sorted);
+    }
+
+    // seenTradeHashes: clear when too large (dedup is best-effort)
+    if (this.seenTradeHashes.size > WhaleScanner.MAX_SEEN_TRADE_HASHES) {
+      this.seenTradeHashes.clear();
+    }
+
+    // clusterSignals: keep most recent
+    if (this.clusterSignals.length > WhaleScanner.MAX_CLUSTER_SIGNALS) {
+      this.clusterSignals = this.clusterSignals.slice(-WhaleScanner.MAX_CLUSTER_SIGNALS);
+    }
+
+    // bigTradeAddresses: keep top by notional
+    if (this.bigTradeAddresses.size > WhaleScanner.MAX_BIG_TRADE_ADDRESSES) {
+      const sorted = [...this.bigTradeAddresses.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, WhaleScanner.MAX_BIG_TRADE_ADDRESSES);
+      this.bigTradeAddresses = new Map(sorted);
+    }
+
+    // copySimResults: keep most recent
+    if (this.copySimResults.size > WhaleScanner.MAX_COPY_SIM_RESULTS) {
+      const excess = this.copySimResults.size - WhaleScanner.MAX_COPY_SIM_RESULTS;
+      const iter = this.copySimResults.keys();
+      for (let i = 0; i < excess; i++) {
+        const key = iter.next().value;
+        if (key !== undefined) this.copySimResults.delete(key);
+      }
+    }
+
+    // requestTimestamps: keep only last 60s
+    const cutoff = Date.now() - 60_000;
+    this.requestTimestamps = this.requestTimestamps.filter((t) => t >= cutoff);
   }
 
   /* ━━━━━━━━━━━━━━ Step 1: Fetch ALL liquid markets (paginated) ━━━━━━━━━━━━━━ */

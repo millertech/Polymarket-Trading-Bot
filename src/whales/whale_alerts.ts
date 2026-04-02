@@ -9,6 +9,7 @@ import type { WhaleDB } from './whale_db';
 import type { WhaleTrackingConfig, AlertType, WhaleTrade, Signal as WhaleSignal } from './whale_types';
 
 export class WhaleAlerts {
+  private static readonly MAX_STATS_CACHE = 2_000;
   private db: WhaleDB;
   private config: WhaleTrackingConfig;
   private tradeStdDevCache = new Map<number, { mean: number; stdDev: number; updatedAt: number }>();
@@ -230,6 +231,17 @@ export class WhaleAlerts {
 
     const stats = { mean, stdDev, updatedAt: Date.now() };
     this.tradeStdDevCache.set(whaleId, stats);
+
+    // Evict oldest entries if cache grows too large
+    if (this.tradeStdDevCache.size > WhaleAlerts.MAX_STATS_CACHE) {
+      let oldestKey: number | undefined;
+      let oldestTime = Infinity;
+      for (const [key, val] of this.tradeStdDevCache) {
+        if (val.updatedAt < oldestTime) { oldestTime = val.updatedAt; oldestKey = key; }
+      }
+      if (oldestKey !== undefined) this.tradeStdDevCache.delete(oldestKey);
+    }
+
     return stats;
   }
 

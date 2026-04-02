@@ -11,6 +11,8 @@ import { consoleLog } from '../reporting/console_log';
  * real MarketData updates for every tracked market.
  */
 export class OrderbookStream extends EventEmitter {
+  private static readonly MAX_CACHE_SIZE = 5_000;
+  private static readonly MAX_SEEN_MARKETS = 50_000;
   private timer?: NodeJS.Timeout;
   private readonly fetcher: MarketFetcher;
   private readonly pollMs: number;
@@ -78,6 +80,7 @@ export class OrderbookStream extends EventEmitter {
         this.cache.set(m.marketId, m);
         this.emit('update', m);
       }
+      this.evictStaleEntries();
       this.persistSeenCache();
       this.pollCount++;
       const newMarkets = this.cache.size - prevSize;
@@ -150,5 +153,25 @@ export class OrderbookStream extends EventEmitter {
     }
 
     return newlyDiscovered;
+  }
+
+  /** Evict oldest entries from cache and seenMarkets when they exceed limits */
+  private evictStaleEntries(): void {
+    if (this.cache.size > OrderbookStream.MAX_CACHE_SIZE) {
+      const excess = this.cache.size - OrderbookStream.MAX_CACHE_SIZE;
+      const iter = this.cache.keys();
+      for (let i = 0; i < excess; i++) {
+        const key = iter.next().value;
+        if (key !== undefined) this.cache.delete(key);
+      }
+    }
+    if (this.seenMarkets.size > OrderbookStream.MAX_SEEN_MARKETS) {
+      const entries = [...this.seenMarkets.entries()]
+        .sort((a, b) => a[1].lastSeenAt.localeCompare(b[1].lastSeenAt));
+      const excess = this.seenMarkets.size - OrderbookStream.MAX_SEEN_MARKETS;
+      for (let i = 0; i < excess; i++) {
+        this.seenMarkets.delete(entries[i][0]);
+      }
+    }
   }
 }

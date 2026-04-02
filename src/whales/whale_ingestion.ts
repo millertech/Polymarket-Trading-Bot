@@ -39,6 +39,7 @@ interface OrderbookSnapshot {
 
 export class WhaleIngestion {
   private db: WhaleDB;
+  private static readonly MAX_METADATA_CACHE = 10_000;
   private clobApi: string;
   private gammaApi: string;
   private config: WhaleTrackingConfig;
