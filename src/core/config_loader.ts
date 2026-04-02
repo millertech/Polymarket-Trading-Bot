@@ -1,6 +1,7 @@
 import fs from 'fs';
 import YAML from 'yaml';
 import { AppConfig, RiskLimits, TradingMode } from '../types';
+import { logger } from '../reporting/logs';
 
 interface RawRiskLimits {
   max_position_size?: number;
@@ -48,6 +49,17 @@ export function loadConfig(path: string): AppConfig {
 
   const liveRequested = Boolean(parsed.environment?.enable_live_trading ?? false);
   const liveEnvEnabled = process.env.ENABLE_LIVE_TRADING === 'true';
+
+  if (liveRequested && !liveEnvEnabled) {
+    logger.warn('config.yaml has enable_live_trading: true but ENABLE_LIVE_TRADING env var is not "true" — live trading disabled');
+  } else if (!liveRequested && liveEnvEnabled) {
+    logger.warn('ENABLE_LIVE_TRADING env var is "true" but config.yaml has enable_live_trading: false — live trading disabled');
+  }
+
+  const hasLiveWallets = wallets.some((w) => w.mode === 'LIVE');
+  if (hasLiveWallets && !(liveRequested && liveEnvEnabled)) {
+    logger.warn('LIVE wallets found in config but live trading is not fully enabled — they will run in PAPER mode');
+  }
 
   return {
     environment: {

@@ -17,13 +17,15 @@ describe('WalletManager', () => {
     expect(wallets[0].mode).toBe('PAPER');
   });
 
-  it('skips live wallets when not enabled', () => {
+  it('falls back to PAPER when live wallets registered with enableLive=false', () => {
     const manager = new WalletManager();
     manager.registerWallet(
       { ...walletConfig, id: 'live_1', mode: 'LIVE' },
       walletConfig.strategy,
       false,
     );
-    expect(manager.listWallets()).toHaveLength(0);
+    const wallets = manager.listWallets();
+    expect(wallets).toHaveLength(1);
+    expect(wallets[0].mode).toBe('PAPER');
   });
 });

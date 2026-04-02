@@ -1,6 +1,7 @@
 import http from 'http';
 import { WalletManager } from '../wallets/wallet_manager';
 import { PaperWallet } from '../wallets/paper_wallet';
+import { PolymarketWallet } from '../wallets/polymarket_wallet';
 import { MarketFetcher } from '../data/market_fetcher';
 import { buildDashboardPayload } from './dashboard_api';
 import { listStrategies } from '../strategies/registry';
@@ -866,22 +867,22 @@ export class DashboardServer {
       const maxTrades = Number(body.maxOpenTrades ?? 10);
       const maxDd = Number(body.maxDrawdown ?? 0.2);
 
-      const wallet = new PaperWallet(
-        {
-          id: walletId,
-          mode: mode === 'LIVE' ? 'LIVE' : 'PAPER',
-          strategy,
-          capital,
-          riskLimits: {
-            maxPositionSize: maxPos,
-            maxExposurePerMarket: maxExp,
-            maxDailyLoss: maxLoss,
-            maxOpenTrades: maxTrades,
-            maxDrawdown: maxDd,
-          },
-        },
+      const walletConfig = {
+        id: walletId,
+        mode: mode === 'LIVE' ? 'LIVE' as const : 'PAPER' as const,
         strategy,
-      );
+        capital,
+        riskLimits: {
+          maxPositionSize: maxPos,
+          maxExposurePerMarket: maxExp,
+          maxDailyLoss: maxLoss,
+          maxOpenTrades: maxTrades,
+          maxDrawdown: maxDd,
+        },
+      };
+      const wallet = mode === 'LIVE'
+        ? new PolymarketWallet(walletConfig, strategy)
+        : new PaperWallet(walletConfig, strategy);
       this.walletManager.addWallet(wallet);
 
       /* Connect the new wallet to the engine so its strategy runs */

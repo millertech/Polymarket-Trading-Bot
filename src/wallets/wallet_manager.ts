@@ -32,9 +32,9 @@ export class WalletManager {
     if (config.mode === 'LIVE' && !enableLive) {
       logger.warn(
         { walletId: config.id },
-        'LIVE trading requested but ENABLE_LIVE_TRADING is false; refusing LIVE wallet',
+        'LIVE trading requested but ENABLE_LIVE_TRADING is false — falling back to PAPER mode',
       );
-      return;
+      config = { ...config, mode: 'PAPER' };
     }
 
     const wallet =

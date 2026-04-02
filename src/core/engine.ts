@@ -39,6 +39,8 @@ export class Engine {
       }
       const walletState = this.walletManager.getWallet(wallet.id)?.getState();
       if (!walletState) {
+        logger.warn({ walletId: wallet.id }, 'Wallet not registered in WalletManager; skipping');
+        consoleLog.warn('ENGINE', `Wallet "${wallet.id}" not found — skipping. Check ENABLE_LIVE_TRADING setting.`);
         continue;
       }
       const strategy = new StrategyCtor();
