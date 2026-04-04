@@ -187,6 +187,11 @@ program
     for (const wallet of config.wallets) {
       walletManager.registerWallet(wallet, wallet.strategy, config.environment.enableLiveTrading);
     }
+
+    if (config.environment.enableLiveTrading) {
+      await walletManager.runLivePreflight();
+    }
+
     const dashboardPort = Number(process.env.DASHBOARD_PORT ?? 3000);
     const dashboardServer = new DashboardServer(walletManager, dashboardPort);
 

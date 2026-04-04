@@ -19,6 +19,8 @@ export interface ExecutionWallet {
   setDisplayName?(name: string): void;
   /** Update risk limits at runtime */
   updateRiskLimits?(limits: Partial<import('../types').RiskLimits>): void;
+  /** Optional startup preflight for LIVE trading reachability / restrictions */
+  preflightLiveAccess?(): Promise<{ ok: boolean; reason?: string; details?: Record<string, unknown> }>;
 }
 
 export class WalletManager {
@@ -98,5 +100,20 @@ export class WalletManager {
       { walletId: state.walletId, mode: state.mode, strategy: state.assignedStrategy, capital: state.capitalAllocated },
       `Wallet ${state.walletId} added at runtime (${state.mode}) strategy=${state.assignedStrategy}`,
     );
+  }
+
+  async runLivePreflight(): Promise<void> {
+    for (const [walletId, wallet] of this.wallets.entries()) {
+      if (!wallet.preflightLiveAccess) continue;
+      const state = wallet.getState();
+      if (state.mode !== 'LIVE') continue;
+
+      const result = await wallet.preflightLiveAccess();
+      if (!result.ok) {
+        logger.warn({ walletId, reason: result.reason, details: result.details }, 'LIVE preflight failed; wallet fallback applied');
+      } else {
+        logger.info({ walletId, details: result.details }, 'LIVE preflight succeeded');
+      }
+    }
   }
 }
