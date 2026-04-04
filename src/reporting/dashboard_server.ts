@@ -659,9 +659,18 @@ function getStrategyCatalog(): StrategyCatalogEntry[] {
    Helpers
    ────────────────────────────────────────────────────────────── */
 function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+  const maxBytes = Number(process.env.DASHBOARD_MAX_BODY_BYTES ?? '1048576');
   return new Promise((resolve, reject) => {
     let data = '';
-    req.on('data', (chunk: Buffer) => (data += chunk.toString()));
+    let totalBytes = 0;
+    req.on('data', (chunk: Buffer) => {
+      totalBytes += chunk.length;
+      if (totalBytes > maxBytes) {
+        req.destroy(new Error('Request body too large'));
+        return;
+      }
+      data += chunk.toString();
+    });
     req.on('end', () => {
       try {
         resolve(JSON.parse(data) as Record<string, unknown>);
@@ -669,7 +678,14 @@ function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
         reject(new Error('Invalid JSON body'));
       }
     });
-    req.on('error', reject);
+    req.on('error', (err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('too large')) {
+        reject(new Error('Request body too large'));
+        return;
+      }
+      reject(err);
+    });
   });
 }
 

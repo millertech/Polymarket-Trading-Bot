@@ -114,6 +114,10 @@ const FETCH_BACKOFF_BASE_MS = Number(ENV.SCANNER_FETCH_BACKOFF_MS ?? '800');
 const FETCH_BACKOFF_MAX_MS = Number(ENV.SCANNER_FETCH_MAX_BACKOFF_MS ?? '6000');
 const MARKET_CACHE_TTL_MS = 300_000;  // 5 min cache for Gamma market metadata
 const PERSISTENT_MARKET_CACHE_TTL_DAYS = 30;
+const SCANNER_MARKETS_JSON_MAX_BYTES = Number(ENV.SCANNER_MARKETS_JSON_MAX_BYTES ?? '8388608');
+const SCANNER_TRADES_JSON_MAX_BYTES = Number(ENV.SCANNER_TRADES_JSON_MAX_BYTES ?? '16777216');
+const SCANNER_SMALL_JSON_MAX_BYTES = Number(ENV.SCANNER_SMALL_JSON_MAX_BYTES ?? '1048576');
+const MAX_TRADES_PER_SIDE_PER_MARKET = Number(ENV.SCANNER_MAX_TRADES_PER_SIDE_PER_MARKET ?? '600');
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    Semaphore — limits concurrent async operations to N at a time.
@@ -403,6 +407,7 @@ export class WhaleScanner {
   private static readonly MAX_CLUSTER_SIGNALS = 1_000;
   private static readonly MAX_BIG_TRADE_ADDRESSES = 10_000;
   private static readonly MAX_COPY_SIM_RESULTS = 5_000;
+  private static readonly MAX_TOP_PROFILES_FOR_NETWORK = 300;
 
   private db: WhaleDB;
   private config: WhaleTrackingConfig;
@@ -733,8 +738,13 @@ export class WhaleScanner {
         const res = await this.fetchWithRetry(url);
         if (!res) break;
 
-        const page: GammaMarket[] = await res.json() as GammaMarket[];
-        if (page.length === 0) { hasMore = false; break; }
+        const page = await this.parseJsonWithLimit<GammaMarket[]>(
+          res,
+          url,
+          SCANNER_MARKETS_JSON_MAX_BYTES,
+          'scanner-markets-page',
+        );
+        if (!Array.isArray(page) || page.length === 0) { hasMore = false; break; }
 
         /* Cache market metadata for fast lookups */
         for (const m of page) this.marketCache.set(m);
@@ -1026,8 +1036,13 @@ export class WhaleScanner {
       const res = await this.fetchWithRetry(url);
       if (!res) break;
 
-      const page: GammaMarket[] = await res.json() as GammaMarket[];
-      if (page.length === 0) { hasMore = false; break; }
+      const page = await this.parseJsonWithLimit<GammaMarket[]>(
+        res,
+        url,
+        SCANNER_MARKETS_JSON_MAX_BYTES,
+        'scanner-all-liquid-markets',
+      );
+      if (!Array.isArray(page) || page.length === 0) { hasMore = false; break; }
 
       const qualifying = page.filter((m) =>
         m.acceptingOrders &&
@@ -1130,7 +1145,12 @@ export class WhaleScanner {
         return [];
       }
 
-      const raw: DataApiTrade[] = await res.json() as DataApiTrade[];
+      const raw = await this.parseJsonWithLimit<DataApiTrade[]>(
+        res,
+        url,
+        SCANNER_TRADES_JSON_MAX_BYTES,
+        'scanner-market-trades',
+      );
       if (!Array.isArray(raw) || raw.length === 0) return [];
 
       return raw
@@ -1240,8 +1260,17 @@ export class WhaleScanner {
         if (t.match_time > mAgg.lastTradeTs) mAgg.lastTradeTs = t.match_time;
 
         const entry: TradeEntry = { price, size, notional, ts: t.match_time, assetId: t.asset_id };
-        if (t.side === 'BUY') mAgg.buys.push(entry);
-        else mAgg.sells.push(entry);
+        if (t.side === 'BUY') {
+          mAgg.buys.push(entry);
+          if (mAgg.buys.length > MAX_TRADES_PER_SIDE_PER_MARKET) {
+            mAgg.buys.splice(0, mAgg.buys.length - MAX_TRADES_PER_SIDE_PER_MARKET);
+          }
+        } else {
+          mAgg.sells.push(entry);
+          if (mAgg.sells.length > MAX_TRADES_PER_SIDE_PER_MARKET) {
+            mAgg.sells.splice(0, mAgg.sells.length - MAX_TRADES_PER_SIDE_PER_MARKET);
+          }
+        }
       }
     }
   }
@@ -1693,7 +1722,12 @@ export class WhaleScanner {
         if (!res) { if (ep) this.apiPool.recordFailure(ep); return; }
         if (ep) this.apiPool.recordSuccess(ep);
 
-        const raw: DataApiTrade[] = await res.json() as DataApiTrade[];
+        const raw = await this.parseJsonWithLimit<DataApiTrade[]>(
+          res,
+          url,
+          SCANNER_TRADES_JSON_MAX_BYTES,
+          'scanner-cross-reference-trades',
+        );
         if (!Array.isArray(raw) || raw.length === 0) return;
 
         const marketTrades = new Map<string, ClobTrade[]>();
@@ -1891,6 +1925,64 @@ export class WhaleScanner {
     return null;
   }
 
+  private parseContentLength(value: string | null): number | null {
+    if (!value) return null;
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  }
+
+  private async parseJsonWithLimit<T>(
+    response: Response,
+    url: string,
+    maxBytes: number,
+    label: string,
+  ): Promise<T | null> {
+    const declared = this.parseContentLength(response.headers.get('content-length'));
+    if (declared !== null && declared > maxBytes) {
+      logger.warn({ url, label, declaredBytes: declared, maxBytes }, 'Skipping oversized JSON payload');
+      return null;
+    }
+
+    const body = response.body;
+    if (!body) {
+      logger.warn({ url, label }, 'Response body missing');
+      return null;
+    }
+
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let totalBytes = 0;
+    let text = '';
+
+    try {
+      // Stream with a hard byte cap so huge payloads never reach JSON.parse.
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+
+        totalBytes += value.byteLength;
+        if (totalBytes > maxBytes) {
+          try { await reader.cancel('payload-too-large'); } catch { /* ignore */ }
+          logger.warn({ url, label, totalBytes, maxBytes }, 'Aborted oversized JSON payload');
+          return null;
+        }
+        text += decoder.decode(value, { stream: true });
+      }
+      text += decoder.decode();
+    } catch (error) {
+      logger.warn({ url, label, error }, 'Failed while reading JSON payload');
+      return null;
+    }
+
+    try {
+      return JSON.parse(text) as T;
+    } catch (error) {
+      logger.warn({ url, label, totalBytes, error }, 'Failed to parse JSON payload');
+      return null;
+    }
+  }
+
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
@@ -1933,7 +2025,15 @@ export class WhaleScanner {
       const res = await this.fetchWithRetry(url);
       if (!res) return;
       if (ep) this.apiPool.recordSuccess(ep);
-      markets = (await res.json() as GammaMarket[]).filter((m) => m.acceptingOrders && m.conditionId);
+      const fetchedMarkets = await this.parseJsonWithLimit<GammaMarket[]>(
+        res,
+        url,
+        SCANNER_MARKETS_JSON_MAX_BYTES,
+        'scanner-fast-scan-markets',
+      );
+      markets = Array.isArray(fetchedMarkets)
+        ? fetchedMarkets.filter((m) => m.acceptingOrders && m.conditionId)
+        : [];
     }
 
     const topN = markets.slice(0, cfg.topMarkets);
@@ -1964,7 +2064,12 @@ export class WhaleScanner {
         if (!res) { if (ep) this.apiPool.recordFailure(ep); return 0; }
         if (ep) this.apiPool.recordSuccess(ep);
 
-        const raw: DataApiTrade[] = await res.json() as DataApiTrade[];
+        const raw = await this.parseJsonWithLimit<DataApiTrade[]>(
+          res,
+          url,
+          SCANNER_TRADES_JSON_MAX_BYTES,
+          'scanner-fast-scan-trades',
+        );
         if (!Array.isArray(raw)) return 0;
 
         let bigTradesFound = 0;
@@ -2036,7 +2141,13 @@ export class WhaleScanner {
     if (!res) return;
     if (ep) this.apiPool.recordSuccess(ep);
 
-    const markets = (await res.json() as GammaMarket[]).filter(
+    const fetchedMarkets = await this.parseJsonWithLimit<GammaMarket[]>(
+      res,
+      url,
+      SCANNER_MARKETS_JSON_MAX_BYTES,
+      'scanner-backfill-markets',
+    );
+    const markets = (Array.isArray(fetchedMarkets) ? fetchedMarkets : []).filter(
       (m) => m.acceptingOrders && m.conditionId && Number(m.liquidityNum) >= MIN_LIQUIDITY_USD,
     );
 
@@ -2069,7 +2180,12 @@ export class WhaleScanner {
           if (!tRes) { if (tep) this.apiPool.recordFailure(tep); return []; }
           if (tep) this.apiPool.recordSuccess(tep);
 
-          const raw: DataApiTrade[] = await tRes.json() as DataApiTrade[];
+          const raw = await this.parseJsonWithLimit<DataApiTrade[]>(
+            tRes,
+            tUrl,
+            SCANNER_TRADES_JSON_MAX_BYTES,
+            'scanner-backfill-trades',
+          );
           if (!Array.isArray(raw) || raw.length === 0) return [];
 
           const recent = raw.filter((t) => {
@@ -2198,7 +2314,9 @@ export class WhaleScanner {
    * in the same markets, in the same direction, at similar times.
    */
   private buildNetworkGraph(): void {
-    const profiles = this.latestProfiles.filter((p) => p.compositeScore >= 30);
+    const profiles = this.latestProfiles
+      .filter((p) => p.compositeScore >= 30)
+      .slice(0, WhaleScanner.MAX_TOP_PROFILES_FOR_NETWORK);
     if (profiles.length < 2) return;
 
     const edges: WhaleNetworkEdge[] = [];
@@ -2516,8 +2634,13 @@ export class WhaleScanner {
         clearTimeout(timer);
 
         if (res.ok) {
-          const json = await res.json() as { result?: string };
-          if (json.result) {
+          const json = await this.parseJsonWithLimit<{ result?: string }>(
+            res,
+            rpcUrl,
+            SCANNER_SMALL_JSON_MAX_BYTES,
+            'scanner-polygon-rpc-balance',
+          );
+          if (json?.result) {
             /* USDC on Polygon has 6 decimals */
             const raw = BigInt(json.result);
             const balance = Number(raw) / 1_000_000;
@@ -2577,8 +2700,13 @@ export class WhaleScanner {
       yes_ask?: number;
     }
 
-    const data = await res.json() as { markets?: KalshiMarket[] };
-    const markets = data.markets ?? [];
+    const data = await this.parseJsonWithLimit<{ markets?: KalshiMarket[] }>(
+      res,
+      url,
+      SCANNER_MARKETS_JSON_MAX_BYTES,
+      'scanner-kalshi-markets',
+    );
+    const markets = data?.markets ?? [];
 
     logger.info({
       exchange: 'kalshi',
@@ -2603,7 +2731,12 @@ export class WhaleScanner {
       totalLiquidity?: number;
     }
 
-    const markets: ManifoldMarket[] = await res.json() as ManifoldMarket[];
+    const markets = await this.parseJsonWithLimit<ManifoldMarket[]>(
+      res,
+      url,
+      SCANNER_MARKETS_JSON_MAX_BYTES,
+      'scanner-manifold-markets',
+    ) ?? [];
 
     /* Manifold has public bet history — could cross-reference with Poly wallets */
     logger.info({

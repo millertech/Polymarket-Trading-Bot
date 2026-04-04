@@ -6,6 +6,8 @@ const FETCH_TIMEOUT_MS = Number(ENV.SCANNER_FETCH_TIMEOUT_MS ?? '20000');
 const FETCH_MAX_RETRIES = Number(ENV.SCANNER_FETCH_RETRIES ?? '4');
 const FETCH_BACKOFF_BASE_MS = Number(ENV.SCANNER_FETCH_BACKOFF_MS ?? '800');
 const FETCH_BACKOFF_MAX_MS = Number(ENV.SCANNER_FETCH_MAX_BACKOFF_MS ?? '6000');
+const MARKET_FETCH_JSON_MAX_BYTES = Number(ENV.MARKET_FETCH_JSON_MAX_BYTES ?? '8388608');
+const MARKET_FETCH_DEFAULT_LIMIT = Number(ENV.MARKET_FETCH_DEFAULT_LIMIT ?? '1200');
 
 /** Raw shape returned by the Gamma API */
 interface GammaMarket {
@@ -42,7 +44,7 @@ export class MarketFetcher {
   /** Page size for Gamma API pagination */
   private static readonly PAGE_SIZE = 100;
 
-  constructor(gammaApi = 'https://gamma-api.polymarket.com', limit = 0) {
+  constructor(gammaApi = 'https://gamma-api.polymarket.com', limit = MARKET_FETCH_DEFAULT_LIMIT) {
     this.gammaApi = gammaApi;
     this.limit = limit;
   }
@@ -81,8 +83,12 @@ export class MarketFetcher {
         break;
       }
 
-      const page: GammaMarket[] = await response.json() as GammaMarket[];
-      if (page.length === 0) break;
+      const page = await this.parseJsonWithLimit<GammaMarket[]>(
+        response,
+        url,
+        MARKET_FETCH_JSON_MAX_BYTES,
+      );
+      if (!Array.isArray(page) || page.length === 0) break;
 
       all.push(...page);
 
@@ -144,6 +150,49 @@ export class MarketFetcher {
 
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private parseContentLength(value: string | null): number | null {
+    if (!value) return null;
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  }
+
+  private async parseJsonWithLimit<T>(response: Response, url: string, maxBytes: number): Promise<T | null> {
+    const declared = this.parseContentLength(response.headers.get('content-length'));
+    if (declared !== null && declared > maxBytes) {
+      logger.warn({ url, declaredBytes: declared, maxBytes }, 'Skipping oversized market payload');
+      return null;
+    }
+
+    const body = response.body;
+    if (!body) return null;
+
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let totalBytes = 0;
+    let text = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        try { await reader.cancel('payload-too-large'); } catch { /* ignore */ }
+        logger.warn({ url, totalBytes, maxBytes }, 'Aborted oversized market payload');
+        return null;
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+
+    try {
+      return JSON.parse(text) as T;
+    } catch (error) {
+      logger.warn({ url, error }, 'Failed to parse market payload');
+      return null;
+    }
   }
 
   /* ── Parse raw Gamma response into MarketData ── */

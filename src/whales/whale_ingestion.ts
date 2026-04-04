@@ -12,6 +12,9 @@ const FETCH_TIMEOUT_MS = Number(process.env.SCANNER_FETCH_TIMEOUT_MS ?? '20000')
 const FETCH_MAX_RETRIES = Number(process.env.SCANNER_FETCH_RETRIES ?? '4');
 const FETCH_BACKOFF_BASE_MS = Number(process.env.SCANNER_FETCH_BACKOFF_MS ?? '800');
 const FETCH_BACKOFF_MAX_MS = Number(process.env.SCANNER_FETCH_MAX_BACKOFF_MS ?? '6000');
+const INGESTION_TRADES_JSON_MAX_BYTES = Number(process.env.SCANNER_TRADES_JSON_MAX_BYTES ?? '16777216');
+const INGESTION_BOOK_JSON_MAX_BYTES = Number(process.env.SCANNER_SMALL_JSON_MAX_BYTES ?? '1048576');
+const INGESTION_MARKETS_JSON_MAX_BYTES = Number(process.env.SCANNER_MARKETS_JSON_MAX_BYTES ?? '8388608');
 
 /** Shape of a single trade from CLOB /trades endpoint */
 interface ClobTrade {
@@ -284,7 +287,13 @@ export class WhaleIngestion {
     this.recordRequest();
     const res = await this.fetchWithRetry(url);
     if (!res) return [];
-    const data = await res.json() as ClobTrade[] | { trades?: ClobTrade[] };
+    const data = await this.parseJsonWithLimit<ClobTrade[] | { trades?: ClobTrade[] }>(
+      res,
+      url,
+      INGESTION_TRADES_JSON_MAX_BYTES,
+      'ingestion-clob-trades',
+    );
+    if (!data) return [];
     return Array.isArray(data) ? data : (data.trades ?? []);
   }
 
@@ -293,7 +302,12 @@ export class WhaleIngestion {
     this.recordRequest();
     const res = await this.fetchWithRetry(url);
     if (!res) return null;
-    return await res.json() as OrderbookSnapshot;
+    return await this.parseJsonWithLimit<OrderbookSnapshot>(
+      res,
+      url,
+      INGESTION_BOOK_JSON_MAX_BYTES,
+      'ingestion-orderbook',
+    );
   }
 
   /** Fetch market metadata from Gamma for enrichment */
@@ -307,7 +321,13 @@ export class WhaleIngestion {
       const url = `${this.gammaApi}/markets?active=true&closed=false&limit=200&order=volume24hr&ascending=false`;
       const res = await this.fetchWithRetry(url);
       if (!res) return;
-      const markets = await res.json() as Array<{ id: string; question: string; slug: string; outcomes: string }>;
+      const markets = await this.parseJsonWithLimit<Array<{ id: string; question: string; slug: string; outcomes: string }>>(
+        res,
+        url,
+        INGESTION_MARKETS_JSON_MAX_BYTES,
+        'ingestion-market-metadata',
+      );
+      if (!Array.isArray(markets)) return;
       this.marketMetadataCache.clear();
       for (const m of markets) {
         this.marketMetadataCache.set(m.id, {
@@ -396,6 +416,59 @@ export class WhaleIngestion {
       }
     }
     return null;
+  }
+
+  private parseContentLength(value: string | null): number | null {
+    if (!value) return null;
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  }
+
+  private async parseJsonWithLimit<T>(
+    response: Response,
+    url: string,
+    maxBytes: number,
+    label: string,
+  ): Promise<T | null> {
+    const declared = this.parseContentLength(response.headers.get('content-length'));
+    if (declared !== null && declared > maxBytes) {
+      logger.warn({ url, label, declaredBytes: declared, maxBytes }, 'Skipping oversized JSON payload');
+      return null;
+    }
+
+    const body = response.body;
+    if (!body) return null;
+
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let totalBytes = 0;
+    let text = '';
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        totalBytes += value.byteLength;
+        if (totalBytes > maxBytes) {
+          try { await reader.cancel('payload-too-large'); } catch { /* ignore */ }
+          logger.warn({ url, label, totalBytes, maxBytes }, 'Aborted oversized JSON payload');
+          return null;
+        }
+        text += decoder.decode(value, { stream: true });
+      }
+      text += decoder.decode();
+    } catch (error) {
+      logger.warn({ url, label, error }, 'Failed while reading JSON payload');
+      return null;
+    }
+
+    try {
+      return JSON.parse(text) as T;
+    } catch (error) {
+      logger.warn({ url, label, error }, 'Failed to parse JSON payload');
+      return null;
+    }
   }
 
   /* ━━━━━━━━━━━━━━ Helpers ━━━━━━━━━━━━━━ */

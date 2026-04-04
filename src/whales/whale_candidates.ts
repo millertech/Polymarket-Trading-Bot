@@ -12,6 +12,8 @@ const FETCH_TIMEOUT_MS = Number(process.env.SCANNER_FETCH_TIMEOUT_MS ?? '20000')
 const FETCH_MAX_RETRIES = Number(process.env.SCANNER_FETCH_RETRIES ?? '4');
 const FETCH_BACKOFF_BASE_MS = Number(process.env.SCANNER_FETCH_BACKOFF_MS ?? '800');
 const FETCH_BACKOFF_MAX_MS = Number(process.env.SCANNER_FETCH_MAX_BACKOFF_MS ?? '6000');
+const CANDIDATES_JSON_MAX_BYTES = Number(process.env.SCANNER_TRADES_JSON_MAX_BYTES ?? '16777216');
+const CANDIDATES_SMALL_JSON_MAX_BYTES = Number(process.env.SCANNER_MARKETS_JSON_MAX_BYTES ?? '8388608');
 
 interface ClobTradeScan {
   id: string;
@@ -125,7 +127,13 @@ export class WhaleCandidates {
       const url = `${this.clobApi}/trades?limit=500`;
       const res = await this.fetchWithRetry(url);
       if (res) {
-        const data = await res.json() as ClobTradeScan[] | { trades?: ClobTradeScan[] };
+        const data = await this.parseJsonWithLimit<ClobTradeScan[] | { trades?: ClobTradeScan[] }>(
+          res,
+          url,
+          CANDIDATES_JSON_MAX_BYTES,
+          'candidates-primary-trades',
+        );
+        if (!data) return [];
         return Array.isArray(data) ? data : (data.trades ?? []);
       }
       /* CLOB auth failed (401) or other error — fall through to data-api */
@@ -158,7 +166,13 @@ export class WhaleCandidates {
         volume24hr?: number;
       }
 
-      const markets: GammaMarketSlim[] = await marketsRes.json() as GammaMarketSlim[];
+      const markets = await this.parseJsonWithLimit<GammaMarketSlim[]>(
+        marketsRes,
+        `${gammaApi}/markets?active=true&closed=false&limit=10&order=volume24hr&ascending=false`,
+        CANDIDATES_SMALL_JSON_MAX_BYTES,
+        'candidates-fallback-markets',
+      );
+      if (!Array.isArray(markets) || markets.length === 0) return [];
       const allTrades: ClobTradeScan[] = [];
 
       for (const m of markets.slice(0, 5)) {
@@ -177,7 +191,12 @@ export class WhaleCandidates {
             asset?: string;
           }
 
-          const raw: DataApiTrade[] = await tradesRes.json() as DataApiTrade[];
+          const raw = await this.parseJsonWithLimit<DataApiTrade[]>(
+            tradesRes,
+            `${dataApi}/trades?market=${m.conditionId}&limit=200`,
+            CANDIDATES_JSON_MAX_BYTES,
+            'candidates-fallback-trades',
+          );
           if (!Array.isArray(raw)) continue;
 
           for (const t of raw) {
@@ -405,6 +424,59 @@ export class WhaleCandidates {
       }
     }
     return null;
+  }
+
+  private parseContentLength(value: string | null): number | null {
+    if (!value) return null;
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  }
+
+  private async parseJsonWithLimit<T>(
+    response: Response,
+    url: string,
+    maxBytes: number,
+    label: string,
+  ): Promise<T | null> {
+    const declared = this.parseContentLength(response.headers.get('content-length'));
+    if (declared !== null && declared > maxBytes) {
+      logger.warn({ url, label, declaredBytes: declared, maxBytes }, 'Skipping oversized JSON payload');
+      return null;
+    }
+
+    const body = response.body;
+    if (!body) return null;
+
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let totalBytes = 0;
+    let text = '';
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        totalBytes += value.byteLength;
+        if (totalBytes > maxBytes) {
+          try { await reader.cancel('payload-too-large'); } catch { /* ignore */ }
+          logger.warn({ url, label, totalBytes, maxBytes }, 'Aborted oversized JSON payload');
+          return null;
+        }
+        text += decoder.decode(value, { stream: true });
+      }
+      text += decoder.decode();
+    } catch (error) {
+      logger.warn({ url, label, error }, 'Failed while reading JSON payload');
+      return null;
+    }
+
+    try {
+      return JSON.parse(text) as T;
+    } catch (error) {
+      logger.warn({ url, label, error }, 'Failed to parse JSON payload');
+      return null;
+    }
   }
 
   private sleep(ms: number): Promise<void> {

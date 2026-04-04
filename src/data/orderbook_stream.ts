@@ -13,6 +13,7 @@ import { consoleLog } from '../reporting/console_log';
 export class OrderbookStream extends EventEmitter {
   private static readonly MAX_CACHE_SIZE = 5_000;
   private static readonly MAX_SEEN_MARKETS = 50_000;
+  private static readonly MAX_SEEN_CACHE_FILE_BYTES = 8 * 1024 * 1024;
   private timer?: NodeJS.Timeout;
   private readonly fetcher: MarketFetcher;
   private readonly pollMs: number;
@@ -105,6 +106,15 @@ export class OrderbookStream extends EventEmitter {
   private loadSeenCache(): void {
     try {
       if (!fs.existsSync(this.seenCachePath)) return;
+      const stats = fs.statSync(this.seenCachePath);
+      if (stats.size > OrderbookStream.MAX_SEEN_CACHE_FILE_BYTES) {
+        logger.warn({
+          path: this.seenCachePath,
+          sizeBytes: stats.size,
+          maxBytes: OrderbookStream.MAX_SEEN_CACHE_FILE_BYTES,
+        }, 'OrderbookStream skipping oversized persistent market cache file');
+        return;
+      }
       const raw = fs.readFileSync(this.seenCachePath, 'utf8');
       if (!raw) return;
       const parsed = JSON.parse(raw) as Record<string, { firstSeenAt: string; lastSeenAt: string }>;
