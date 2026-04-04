@@ -8,6 +8,11 @@ import { logger } from '../reporting/logs';
 import type { WhaleDB } from './whale_db';
 import type { WhaleTrade, WhaleTrackingConfig, AggressorSide } from './whale_types';
 
+const FETCH_TIMEOUT_MS = Number(process.env.SCANNER_FETCH_TIMEOUT_MS ?? '20000');
+const FETCH_MAX_RETRIES = Number(process.env.SCANNER_FETCH_RETRIES ?? '4');
+const FETCH_BACKOFF_BASE_MS = Number(process.env.SCANNER_FETCH_BACKOFF_MS ?? '800');
+const FETCH_BACKOFF_MAX_MS = Number(process.env.SCANNER_FETCH_MAX_BACKOFF_MS ?? '6000');
+
 /** Shape of a single trade from CLOB /trades endpoint */
 interface ClobTrade {
   id: string;
@@ -347,10 +352,22 @@ export class WhaleIngestion {
 
   /* ━━━━━━━━━━━━━━ Fetch with retry + exponential backoff ━━━━━━━━━━━━━━ */
 
-  private async fetchWithRetry(url: string, maxRetries = 3): Promise<Response | null> {
+  private computeBackoffMs(attempt: number): number {
+    const base = Math.min(FETCH_BACKOFF_MAX_MS, FETCH_BACKOFF_BASE_MS * (2 ** attempt));
+    const jitter = Math.round(base * 0.15 * Math.random());
+    return base + jitter;
+  }
+
+  private async fetchWithRetry(url: string, maxRetries = FETCH_MAX_RETRIES, timeoutMs = FETCH_TIMEOUT_MS): Promise<Response | null> {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
-        const res = await fetch(url);
+        const res = await fetch(url, {
+          signal: controller.signal,
+          headers: { accept: 'application/json' },
+        });
+        clearTimeout(timer);
         if (res.ok) return res;
         if (res.status === 429) {
           const retryAfter = parseInt(res.headers.get('retry-after') || '5', 10);
@@ -360,18 +377,22 @@ export class WhaleIngestion {
         }
         if (res.status >= 500) {
           logger.warn({ status: res.status, attempt }, 'Server error, retrying');
-          await this.sleep(Math.pow(2, attempt) * 1000);
+          await this.sleep(this.computeBackoffMs(attempt));
           continue;
         }
         // 4xx (non-429) — don't retry
         logger.error({ status: res.status, url: url.replace(/maker_address=0x[a-fA-F0-9]+/, 'maker_address=REDACTED') }, 'CLOB request failed');
         return null;
-      } catch (err) {
+      } catch (err: any) {
+        clearTimeout(timer);
+        if (err?.name === 'AbortError') {
+          logger.warn({ url, attempt }, 'Ingestion fetch timed out after %dms', timeoutMs);
+        }
         if (attempt === maxRetries) {
           logger.error({ err, attempt }, 'Fetch failed after retries');
           return null;
         }
-        await this.sleep(Math.pow(2, attempt) * 1000);
+        await this.sleep(this.computeBackoffMs(attempt));
       }
     }
     return null;

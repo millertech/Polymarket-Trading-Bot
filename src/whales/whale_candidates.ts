@@ -8,6 +8,11 @@ import { logger } from '../reporting/logs';
 import type { WhaleDB } from './whale_db';
 import type { WhaleTrackingConfig } from './whale_types';
 
+const FETCH_TIMEOUT_MS = Number(process.env.SCANNER_FETCH_TIMEOUT_MS ?? '20000');
+const FETCH_MAX_RETRIES = Number(process.env.SCANNER_FETCH_RETRIES ?? '4');
+const FETCH_BACKOFF_BASE_MS = Number(process.env.SCANNER_FETCH_BACKOFF_MS ?? '800');
+const FETCH_BACKOFF_MAX_MS = Number(process.env.SCANNER_FETCH_MAX_BACKOFF_MS ?? '6000');
+
 interface ClobTradeScan {
   id: string;
   market: string;
@@ -118,13 +123,13 @@ export class WhaleCandidates {
     /* Primary: CLOB API */
     try {
       const url = `${this.clobApi}/trades?limit=500`;
-      const res = await fetch(url);
-      if (res.ok) {
+      const res = await this.fetchWithRetry(url);
+      if (res) {
         const data = await res.json() as ClobTradeScan[] | { trades?: ClobTradeScan[] };
         return Array.isArray(data) ? data : (data.trades ?? []);
       }
       /* CLOB auth failed (401) or other error — fall through to data-api */
-      logger.debug({ status: res.status }, 'CLOB trades unavailable, falling back to data-api');
+      logger.debug('CLOB trades unavailable, falling back to data-api');
     } catch {
       logger.debug('CLOB trades fetch error, falling back to data-api');
     }
@@ -143,10 +148,10 @@ export class WhaleCandidates {
 
     try {
       /* Fetch top liquid markets from Gamma */
-      const marketsRes = await fetch(
+      const marketsRes = await this.fetchWithRetry(
         `${gammaApi}/markets?active=true&closed=false&limit=10&order=volume24hr&ascending=false`,
       );
-      if (!marketsRes.ok) return [];
+      if (!marketsRes) return [];
 
       interface GammaMarketSlim {
         conditionId?: string;
@@ -159,8 +164,8 @@ export class WhaleCandidates {
       for (const m of markets.slice(0, 5)) {
         if (!m.conditionId) continue;
         try {
-          const tradesRes = await fetch(`${dataApi}/trades?market=${m.conditionId}&limit=200`);
-          if (!tradesRes.ok) continue;
+          const tradesRes = await this.fetchWithRetry(`${dataApi}/trades?market=${m.conditionId}&limit=200`);
+          if (!tradesRes) continue;
 
           interface DataApiTrade {
             transactionHash?: string;
@@ -363,5 +368,46 @@ export class WhaleCandidates {
         logger.info({ address: c.address.slice(0, 10) + '...', rankScore: c.rankScore }, 'Auto-tracked whale candidate');
       }
     }
+  }
+
+  private computeBackoffMs(attempt: number): number {
+    const base = Math.min(FETCH_BACKOFF_MAX_MS, FETCH_BACKOFF_BASE_MS * (2 ** attempt));
+    const jitter = Math.round(base * 0.15 * Math.random());
+    return base + jitter;
+  }
+
+  private async fetchWithRetry(url: string, maxRetries = FETCH_MAX_RETRIES, timeoutMs = FETCH_TIMEOUT_MS): Promise<Response | null> {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, {
+          signal: controller.signal,
+          headers: { accept: 'application/json' },
+        });
+        clearTimeout(timer);
+
+        if (res.ok) return res;
+        if (res.status === 429) {
+          const retryAfter = parseInt(res.headers.get('retry-after') || '5', 10);
+          await this.sleep(retryAfter * 1000);
+          continue;
+        }
+        if (res.status >= 500 && attempt < maxRetries) {
+          await this.sleep(this.computeBackoffMs(attempt));
+          continue;
+        }
+        return null;
+      } catch {
+        clearTimeout(timer);
+        if (attempt >= maxRetries) return null;
+        await this.sleep(this.computeBackoffMs(attempt));
+      }
+    }
+    return null;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }

@@ -1,6 +1,12 @@
 import { MarketData } from '../types';
 import { logger } from '../reporting/logs';
 
+const ENV = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
+const FETCH_TIMEOUT_MS = Number(ENV.SCANNER_FETCH_TIMEOUT_MS ?? '20000');
+const FETCH_MAX_RETRIES = Number(ENV.SCANNER_FETCH_RETRIES ?? '4');
+const FETCH_BACKOFF_BASE_MS = Number(ENV.SCANNER_FETCH_BACKOFF_MS ?? '800');
+const FETCH_BACKOFF_MAX_MS = Number(ENV.SCANNER_FETCH_MAX_BACKOFF_MS ?? '6000');
+
 /** Raw shape returned by the Gamma API */
 interface GammaMarket {
   id: string;
@@ -68,10 +74,10 @@ export class MarketFetcher {
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const url = `${this.gammaApi}/markets?active=true&closed=false&limit=${pageSize}&offset=${offset}&order=volume24hr&ascending=false`;
-      const response = await fetch(url);
+      const response = await this.fetchWithRetry(url);
 
-      if (!response.ok) {
-        logger.error({ status: response.status, offset }, 'Gamma API page request failed');
+      if (!response) {
+        logger.error({ offset }, 'Gamma API page request failed');
         break;
       }
 
@@ -92,6 +98,52 @@ export class MarketFetcher {
     }
 
     return all;
+  }
+
+  private computeBackoffMs(attempt: number): number {
+    const base = Math.min(FETCH_BACKOFF_MAX_MS, FETCH_BACKOFF_BASE_MS * (2 ** attempt));
+    const jitter = Math.round(base * 0.15 * Math.random());
+    return base + jitter;
+  }
+
+  private async fetchWithRetry(url: string, maxRetries = FETCH_MAX_RETRIES, timeoutMs = FETCH_TIMEOUT_MS): Promise<Response | null> {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, {
+          signal: controller.signal,
+          headers: { accept: 'application/json' },
+        });
+        clearTimeout(timer);
+
+        if (res.ok) return res;
+        if (res.status === 429) {
+          const retryAfter = parseInt(res.headers.get('retry-after') || '5', 10);
+          await this.sleep(retryAfter * 1000);
+          continue;
+        }
+        if (res.status >= 500 && attempt < maxRetries) {
+          await this.sleep(this.computeBackoffMs(attempt));
+          continue;
+        }
+
+        logger.error({ status: res.status, url }, 'Gamma request failed');
+        return null;
+      } catch (error: any) {
+        clearTimeout(timer);
+        if (attempt >= maxRetries) {
+          logger.error({ error, url, attempt }, 'Gamma request failed after retries');
+          return null;
+        }
+        await this.sleep(this.computeBackoffMs(attempt));
+      }
+    }
+    return null;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /* ── Parse raw Gamma response into MarketData ── */

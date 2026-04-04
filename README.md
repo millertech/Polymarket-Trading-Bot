@@ -507,6 +507,11 @@ copy .env.example .env     # Windows
 | `POLYMARKET_API_KEY` | For live trading | *(empty)* | Your Polymarket API key |
 | `DASHBOARD_PORT` | No | `3000` | Which port the dashboard runs on |
 | `LOG_LEVEL` | No | `info` | Logging detail: `debug`, `info`, `warn`, `error` |
+| `SCANNER_FETCH_TIMEOUT_MS` | No | `20000` | Whale data fetch timeout (ms) |
+| `SCANNER_FETCH_RETRIES` | No | `4` | Whale data fetch retry attempts |
+| `SCANNER_FETCH_BACKOFF_MS` | No | `800` | Whale fetch retry backoff base delay (ms) |
+| `SCANNER_FETCH_MAX_BACKOFF_MS` | No | `6000` | Whale fetch retry backoff cap (ms) |
+| `SCANNER_GAMMA_PAGE_SIZE` | No | `100` | Gamma markets page size (lower can help slow VPN links) |
 
 ### Example .env for paper trading (no changes needed):
 
@@ -515,6 +520,11 @@ ENABLE_LIVE_TRADING=false
 POLYMARKET_API_KEY=
 DASHBOARD_PORT=3000
 LOG_LEVEL=info
+SCANNER_FETCH_TIMEOUT_MS=20000
+SCANNER_FETCH_RETRIES=4
+SCANNER_FETCH_BACKOFF_MS=800
+SCANNER_FETCH_MAX_BACKOFF_MS=6000
+SCANNER_GAMMA_PAGE_SIZE=100
 ```
 
 ### Example .env for live trading:
@@ -524,6 +534,23 @@ ENABLE_LIVE_TRADING=true
 POLYMARKET_API_KEY=your_api_key_from_polymarket
 DASHBOARD_PORT=3000
 LOG_LEVEL=info
+SCANNER_FETCH_TIMEOUT_MS=20000
+SCANNER_FETCH_RETRIES=4
+SCANNER_FETCH_BACKOFF_MS=800
+SCANNER_FETCH_MAX_BACKOFF_MS=6000
+SCANNER_GAMMA_PAGE_SIZE=100
+```
+
+### Raspberry Pi / WireGuard timing preset
+
+If scanner logs show timeout errors fetching Gamma markets, start with:
+
+```env
+SCANNER_FETCH_TIMEOUT_MS=20000
+SCANNER_FETCH_RETRIES=5
+SCANNER_FETCH_BACKOFF_MS=800
+SCANNER_FETCH_MAX_BACKOFF_MS=6000
+SCANNER_GAMMA_PAGE_SIZE=50
 ```
 
 > The `.env.example` file is included in the repo as a template. Copy it to `.env` and fill in your values.

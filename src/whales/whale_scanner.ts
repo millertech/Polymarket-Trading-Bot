@@ -104,10 +104,14 @@ interface PnlResult {
 }
 
 /* ── Constants ── */
-const GAMMA_PAGE_SIZE = 100;
+const ENV = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
+const GAMMA_PAGE_SIZE = Number(ENV.SCANNER_GAMMA_PAGE_SIZE ?? '100');
 const MIN_LIQUIDITY_USD = 10_000;
 const BATCH_PAUSE_MS = 500;           // ← reduced from 2 000 ms for faster cycling
-const FETCH_TIMEOUT_MS = 6_000;       // ← tighter timeout (was 10 000)
+const FETCH_TIMEOUT_MS = Number(ENV.SCANNER_FETCH_TIMEOUT_MS ?? '20000');
+const FETCH_MAX_RETRIES = Number(ENV.SCANNER_FETCH_RETRIES ?? '4');
+const FETCH_BACKOFF_BASE_MS = Number(ENV.SCANNER_FETCH_BACKOFF_MS ?? '800');
+const FETCH_BACKOFF_MAX_MS = Number(ENV.SCANNER_FETCH_MAX_BACKOFF_MS ?? '6000');
 const MARKET_CACHE_TTL_MS = 300_000;  // 5 min cache for Gamma market metadata
 const PERSISTENT_MARKET_CACHE_TTL_DAYS = 30;
 
@@ -1848,12 +1852,21 @@ export class WhaleScanner {
     this.requestTimestamps.push(Date.now());
   }
 
-  private async fetchWithRetry(url: string, maxRetries = 1, timeoutMs = FETCH_TIMEOUT_MS): Promise<Response | null> {
+  private computeBackoffMs(attempt: number): number {
+    const base = Math.min(FETCH_BACKOFF_MAX_MS, FETCH_BACKOFF_BASE_MS * (2 ** attempt));
+    const jitter = Math.round(base * 0.15 * Math.random());
+    return base + jitter;
+  }
+
+  private async fetchWithRetry(url: string, maxRetries = FETCH_MAX_RETRIES, timeoutMs = FETCH_TIMEOUT_MS): Promise<Response | null> {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
-        const res = await fetch(url, { signal: controller.signal });
+        const res = await fetch(url, {
+          signal: controller.signal,
+          headers: { accept: 'application/json' },
+        });
         clearTimeout(timer);
         if (res.ok) return res;
         if (res.status === 429) {
@@ -1862,7 +1875,7 @@ export class WhaleScanner {
           continue;
         }
         if (res.status >= 500) {
-          await this.sleep(Math.pow(2, attempt) * 1000);
+          await this.sleep(this.computeBackoffMs(attempt));
           continue;
         }
         return null;
@@ -1872,7 +1885,7 @@ export class WhaleScanner {
           logger.warn({ url, attempt }, 'Scanner fetch timed out after %dms', timeoutMs);
         }
         if (attempt === maxRetries) { logger.error({ err, attempt }, 'Scanner fetch failed'); return null; }
-        await this.sleep(Math.pow(2, attempt) * 1000);
+        await this.sleep(this.computeBackoffMs(attempt));
       }
     }
     return null;
