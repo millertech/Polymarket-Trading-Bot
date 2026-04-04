@@ -66,9 +66,7 @@ export abstract class BaseStrategy implements StrategyInterface {
     });
 
     return filtered.map((signal) => {
-      // Record cooldown
       const key = `${signal.marketId}:${signal.outcome}:${signal.side}`;
-      this.tradeCooldowns.set(key, now);
 
       // Use actual market price when available, fall back to 0.5 + edge
       const market = this.markets.get(signal.marketId);
@@ -101,8 +99,10 @@ export abstract class BaseStrategy implements StrategyInterface {
    * Called by the engine after a successful fill.
    * Override in subclasses to track positions.
    */
-  notifyFill(_order: OrderRequest): void {
-    return;
+  notifyFill(order: OrderRequest): void {
+    // Record cooldown only after a successful fill, not at sizing time
+    const key = `${order.marketId}:${order.outcome}:${order.side}`;
+    this.tradeCooldowns.set(key, Date.now());
   }
 
   managePositions(): void {

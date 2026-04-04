@@ -240,6 +240,8 @@ export class Engine {
 
   private async processSignals(runner: StrategyRunner): Promise<void> {
     const signals = await runner.strategy.generateSignals();
+
+    // Log signal count every tick for visibility (debug level when 0, info when > 0)
     if (signals.length > 0) {
       consoleLog.info('SIGNAL', `[${runner.strategy.name}] Generated ${signals.length} signal(s) for wallet ${runner.walletId}`, {
         walletId: runner.walletId,
@@ -252,6 +254,13 @@ export class Engine {
           edge: Number((s.edge ?? 0).toFixed(4)),
         })),
       });
+    } else if (this.tickCount % 12 === 0) {
+      // Every ~60s, log market count per strategy so we know they're scanning
+      const marketCount = (runner.strategy as unknown as { markets?: Map<string, unknown> }).markets?.size ?? 0;
+      logger.info(
+        { strategy: runner.strategy.name, walletId: runner.walletId, marketCount, signals: 0 },
+        `[${runner.strategy.name}] 0 signals from ${marketCount} markets (wallet ${runner.walletId})`,
+      );
     }
 
     const orders = await runner.strategy.sizePositions(signals);

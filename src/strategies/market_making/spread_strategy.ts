@@ -36,7 +36,7 @@ export class SpreadStrategy extends BaseStrategy {
   /* ── Configuration ── */
   private minVolume = 1_500;
   private minLiquidity = 300;
-  private minSpread = 0.004;        // 40 bps minimum spread to be profitable
+  private minSpread = 0.002;        // 20 bps minimum spread to be profitable
   private maxInventoryPerMarket = 60; // max shares per side per market
   private maxTotalMarkets = 12;       // max number of markets to quote
   private inventorySkewFactor = 0.3;  // how much to skew quotes with inventory
@@ -162,6 +162,7 @@ export class SpreadStrategy extends BaseStrategy {
 
   /** Track inventory on fill via engine callback */
   override notifyFill(order: OrderRequest): void {
+    super.notifyFill(order);
     if (order.strategy !== this.name) return;
     const inv = this.inventory.get(order.marketId) ?? { yesShares: 0, noShares: 0, totalCost: 0 };
     if (order.side === 'BUY' && order.outcome === 'YES') {

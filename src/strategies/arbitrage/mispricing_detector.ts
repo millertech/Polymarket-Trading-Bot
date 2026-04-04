@@ -194,6 +194,7 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
 
   /* ── Position tracking via engine callback ──────────────────── */
   override notifyFill(order: OrderRequest): void {
+    super.notifyFill(order);
     if (order.strategy !== this.name) return;
     this.positions.push({
       marketId: order.marketId,

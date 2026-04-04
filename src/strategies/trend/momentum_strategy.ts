@@ -31,13 +31,13 @@ const MAX_TICK_DEPLOY = 0.20;
 const MAX_SHARES      = 30;
 
 /* ── Gamma momentum thresholds ── */
-const MIN_DAY_CHANGE  = 0.03;
-const MIN_WEEK_CHANGE = 0.05;
+const MIN_DAY_CHANGE  = 0.015;
+const MIN_WEEK_CHANGE = 0.03;
 
 /* ── Technical thresholds ── */
-const SHORT_WINDOW    = 4;
-const MED_WINDOW      = 8;
-const LONG_WINDOW     = 12;
+const SHORT_WINDOW    = 3;
+const MED_WINDOW      = 6;
+const LONG_WINDOW     = 9;
 const RSI_PERIOD      = 14;
 const RSI_OVERSOLD    = 30;
 const RSI_OVERBOUGHT  = 70;
@@ -101,6 +101,7 @@ export class MomentumStrategy extends BaseStrategy {
 
   /* ── Position tracking via engine callback ── */
   override notifyFill(order: OrderRequest): void {
+    super.notifyFill(order);
     if (order.side !== 'BUY') return;
     this.managedPositions.set(order.marketId, {
       marketId: order.marketId,

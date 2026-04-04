@@ -418,6 +418,7 @@ export class AiForecastStrategy extends BaseStrategy {
 
   /* ── Position tracking via engine callback ──────────────────── */
   override notifyFill(order: OrderRequest): void {
+    super.notifyFill(order);
     if (order.strategy !== this.name) return;
     const prices = this.priceHistory.get(order.marketId) ?? [];
     const regime = this.detectRegime(prices);

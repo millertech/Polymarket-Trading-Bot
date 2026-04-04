@@ -407,6 +407,7 @@ export class CopyTradeStrategy extends BaseStrategy {
   /* ━━━━━━━━━━━━━━ Fill Tracking ━━━━━━━━━━━━━━ */
 
   override notifyFill(order: OrderRequest): void {
+    super.notifyFill(order);
     if (order.side !== 'BUY') return;
 
     // Find the whale address from the pending data

@@ -28,7 +28,7 @@ const MIN_VOLUME = 1_000;
 const MIN_LIQUIDITY = 200;
 const STALE_MS = 60_000;
 const TAKER_FEE_BPS = 20; // Polymarket fee estimate
-const MIN_NET_EDGE_BPS = 40; // Lower threshold to catch more arbs
+const MIN_NET_EDGE_BPS = 15; // Lowered to capture more arb opportunities
 const MAX_CONFIDENCE = 0.92;
 const MAX_POSITIONS = 15;
 
@@ -230,6 +230,7 @@ export class CrossMarketArbitrageStrategy extends BaseStrategy {
 
   /* ── Position tracking via engine callback ──────────────────── */
   override notifyFill(order: OrderRequest): void {
+    super.notifyFill(order);
     if (order.strategy !== this.name) return;
     this.positions.push({
       marketId: order.marketId,

@@ -13,21 +13,21 @@ import { logger } from '../../reporting/logs';
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 const DEFAULTS: ConvergenceConfig = {
   enabled: true,
-  min_liquidity_usd: 10_000,
-  min_prob: 0.69,
-  max_prob: 0.90,
-  max_spread_bps: 100,
-  max_days_to_resolution: 14,
-  spike_pct: 0.08,
+  min_liquidity_usd: 5_000,
+  min_prob: 0.55,
+  max_prob: 0.96,
+  max_spread_bps: 200,
+  max_days_to_resolution: 30,
+  spike_pct: 0.10,
   spike_lookback_minutes: 60,
-  min_depth_usd_within_1pct: 2_000,
-  min_imbalance: 0.10,
+  min_depth_usd_within_1pct: 500,
+  min_imbalance: 0.05,
   flow_lookback_minutes: 15,
-  min_net_buy_flow_usd: 500,
-  max_correlated_exposure_pct: 0.25,
-  base_risk_pct: 0.005,
-  max_position_usd_per_market: 200,
-  max_total_open_positions: 10,
+  min_net_buy_flow_usd: 200,
+  max_correlated_exposure_pct: 0.35,
+  base_risk_pct: 0.02,
+  max_position_usd_per_market: 500,
+  max_total_open_positions: 20,
   ttl_seconds: 120,
   allow_take_on_momentum: false,
   take_profit_bps: 200,
@@ -245,8 +245,7 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
 
       /* Convert USD to shares at the entry price */
       const entryPrice = this.computeEntryPrice(market, order.side);
-      const shares = Math.floor(positionUsd / entryPrice);
-      if (shares < 1) continue;
+      const shares = Math.max(1, Math.floor(positionUsd / entryPrice));
 
       /* MLE check: max loss at resolution for this market */
       const mle = entryPrice * shares; // max we could lose if resolves to 0
@@ -280,6 +279,7 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
      4. POSITION TRACKING — via engine notifyFill callback
      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
   override notifyFill(order: OrderRequest): void {
+    super.notifyFill(order);
     if (order.strategy !== this.name) return;
     const market = this.markets.get(order.marketId);
     const score = market ? this.computeSetupScore(market) : { value: 0.5 } as SetupScore;
@@ -583,7 +583,8 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
   /* ─── D) Time-to-Resolution Filter ─── */
   private filterTimeToResolution(m: MarketData): FilterResult {
     if (!m.endDate) {
-      return { pass: false, reason: 'no endDate – skipping unknown horizon' };
+      // Many Polymarket markets lack endDate — allow with a generous assumed horizon
+      return { pass: true };
     }
     const daysLeft = (new Date(m.endDate).getTime() - Date.now()) / 86_400_000;
     if (daysLeft <= 0) {
