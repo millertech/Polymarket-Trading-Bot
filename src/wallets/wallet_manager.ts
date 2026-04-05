@@ -22,6 +22,23 @@ export interface ExecutionWallet {
   updateRiskLimits?(limits: Partial<import('../types').RiskLimits>): void;
   /** Optional startup preflight for LIVE trading reachability / restrictions */
   preflightLiveAccess?(): Promise<{ ok: boolean; reason?: string; details?: Record<string, unknown> }>;
+  /** Optional runtime state rehydration (used on bot restart) */
+  rehydrateRuntimeState?(snapshot: {
+    state: WalletState;
+    trades: TradeRecord[];
+    displayName?: string;
+  }): void;
+}
+
+export interface WalletRuntimeSnapshot {
+  version: number;
+  savedAt: string;
+  wallets: Array<{
+    walletId: string;
+    state: WalletState;
+    trades: TradeRecord[];
+    displayName: string;
+  }>;
 }
 
 export class WalletManager {
@@ -116,5 +133,55 @@ export class WalletManager {
         logger.info({ walletId, details: result.details }, 'LIVE preflight succeeded');
       }
     }
+  }
+
+  createRuntimeSnapshot(): WalletRuntimeSnapshot {
+    const wallets = Array.from(this.wallets.entries()).map(([walletId, wallet]) => ({
+      walletId,
+      state: wallet.getState(),
+      trades: wallet.getTradeHistory(),
+      displayName: typeof wallet.getDisplayName === 'function'
+        ? wallet.getDisplayName()
+        : walletId,
+    }));
+
+    return {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      wallets,
+    };
+  }
+
+  rehydrateFromRuntimeSnapshot(snapshot: WalletRuntimeSnapshot): {
+    restored: number;
+    skipped: number;
+  } {
+    if (!snapshot || !Array.isArray(snapshot.wallets)) {
+      return { restored: 0, skipped: 0 };
+    }
+
+    let restored = 0;
+    let skipped = 0;
+
+    for (const entry of snapshot.wallets) {
+      const wallet = this.wallets.get(entry.walletId);
+      if (!wallet || typeof wallet.rehydrateRuntimeState !== 'function') {
+        skipped++;
+        continue;
+      }
+
+      try {
+        wallet.rehydrateRuntimeState({
+          state: entry.state,
+          trades: Array.isArray(entry.trades) ? entry.trades : [],
+          displayName: entry.displayName,
+        });
+        restored++;
+      } catch {
+        skipped++;
+      }
+    }
+
+    return { restored, skipped };
   }
 }

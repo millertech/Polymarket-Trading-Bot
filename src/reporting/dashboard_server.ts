@@ -741,6 +741,71 @@ export class DashboardServer {
       .filter((s): s is CopyTradeStrategy => s instanceof CopyTradeStrategy);
   }
 
+  private async exitAllOpenPositionsAndStop(): Promise<{
+    ok: boolean;
+    closedOrders: number;
+    failedOrders: number;
+    errors: string[];
+  }> {
+    if (!this.engine) {
+      return { ok: false, closedOrders: 0, failedOrders: 0, errors: ['Engine not available'] };
+    }
+
+    const errors: string[] = [];
+    let closedOrders = 0;
+    let failedOrders = 0;
+
+    const wallets = this.walletManager.listWallets();
+    for (const w of wallets) {
+      this.engine.pauseRunner(w.walletId);
+    }
+
+    const priceMap = this.getLiveMarketPrices();
+
+    for (const walletState of wallets) {
+      const wallet = this.walletManager.getWallet(walletState.walletId);
+      if (!wallet) continue;
+
+      for (const pos of walletState.openPositions.filter((p) => p.size > 0)) {
+        const marketPrice = priceMap.get(pos.marketId);
+        const exitPrice = Number(
+          Math.min(0.99, Math.max(0.01, marketPrice ?? pos.avgPrice ?? 0.5)).toFixed(4),
+        );
+
+        try {
+          await wallet.placeOrder({
+            marketId: pos.marketId,
+            outcome: pos.outcome,
+            side: 'SELL',
+            price: exitPrice,
+            size: pos.size,
+          });
+          closedOrders++;
+        } catch (err) {
+          failedOrders++;
+          const msg = err instanceof Error ? err.message : String(err);
+          errors.push(`${walletState.walletId}:${pos.marketId}:${pos.outcome} -> ${msg}`);
+        }
+      }
+    }
+
+    if (failedOrders > 0) {
+      return { ok: false, closedOrders, failedOrders, errors };
+    }
+
+    logger.warn({ closedOrders }, 'Kill Switch executed: all positions exited, stopping bot process');
+    setTimeout(() => {
+      try {
+        this.engine?.stop();
+        this.stop();
+      } finally {
+        setTimeout(() => process.exit(0), 250);
+      }
+    }, 100);
+
+    return { ok: true, closedOrders, failedOrders: 0, errors: [] };
+  }
+
   start(): void {
     if (this.server) return;
 
@@ -829,6 +894,29 @@ export class DashboardServer {
         this.engine?.getPausedWallets(),
         this.walletDisplayNames,
       ));
+      return;
+    }
+
+    /* ─── JSON: global kill switch (exit all positions, then stop bot) ─── */
+    if (path === '/api/kill-switch' && method === 'POST') {
+      const result = await this.exitAllOpenPositionsAndStop();
+      if (!result.ok) {
+        json(res, 500, {
+          ok: false,
+          error: 'Failed to close all positions. Bot was not stopped.',
+          closedOrders: result.closedOrders,
+          failedOrders: result.failedOrders,
+          errors: result.errors,
+        });
+      } else {
+        json(res, 200, {
+          ok: true,
+          message: 'Kill Switch executed. All open positions were exited. Bot is stopping.',
+          closedOrders: result.closedOrders,
+          failedOrders: result.failedOrders,
+          errors: result.errors,
+        });
+      }
       return;
     }
 
@@ -1745,6 +1833,7 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
     <button class="tab-btn" data-tab="console">📟 Console</button>
   </div>
   <div class="header-right">
+    <button id="kill-switch-btn" style="background:#b42318;color:#fff;border:1px solid #ef4444;font-size:12px;font-weight:700;padding:6px 10px;border-radius:8px;cursor:pointer">Kill Switch</button>
     <span class="pulse"></span>
     <span class="header-ts" id="hdr-ts">Loading\u2026</span>
   </div>
@@ -2375,6 +2464,37 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
 let currentData = null;
 let strategies = [];
 let walletList = [];
+
+async function triggerKillSwitch(){
+  const ok = confirm('Kill Switch will attempt to exit ALL open positions, then stop the bot. Continue?');
+  if(!ok) return;
+
+  const btn = document.getElementById('kill-switch-btn');
+  if(btn){
+    btn.disabled = true;
+    btn.textContent = 'Killing...';
+  }
+
+  try{
+    const r = await fetch('/api/kill-switch', { method: 'POST' });
+    const j = await r.json();
+    if(!j.ok){
+      alert('Kill Switch failed: ' + (j.error || 'unknown error'));
+      if(btn){
+        btn.disabled = false;
+        btn.textContent = 'Kill Switch';
+      }
+      return;
+    }
+    alert('Kill Switch succeeded. Bot is stopping now.');
+  }catch(e){
+    alert('Kill Switch request failed. Check server logs.');
+    if(btn){
+      btn.disabled = false;
+      btn.textContent = 'Kill Switch';
+    }
+  }
+}
 
 /* ─── Tab switching ─── */
 document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -4558,6 +4678,9 @@ async function refresh(){
 }
 
 /* ─── Boot ─── */
+const killBtn = document.getElementById('kill-switch-btn');
+if(killBtn) killBtn.addEventListener('click', triggerKillSwitch);
+
 fetchDashboardData();
 populateStrategyDropdown().then(()=>refresh());
 connectSSE();

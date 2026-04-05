@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import YAML from 'yaml';
 import { loadConfig } from './core/config_loader';
-import { WalletManager } from './wallets/wallet_manager';
+import { WalletManager, WalletRuntimeSnapshot } from './wallets/wallet_manager';
 import { KillSwitch } from './risk/kill_switch';
 import { RiskEngine } from './risk/risk_engine';
 import { TradeExecutor } from './execution/trade_executor';
@@ -21,6 +21,7 @@ import type { WhaleTrackingConfig, ScannerConfig } from './whales/whale_types';
 
 const program = new Command();
 const statePath = path.resolve('.runtime/state.json');
+const walletSnapshotPath = path.resolve('.runtime/wallet-runtime.snapshot.json');
 
 /* ── Config normalization helpers ── */
 
@@ -172,6 +173,21 @@ function readState(): Record<string, unknown> {
   return JSON.parse(fs.readFileSync(statePath, 'utf8')) as Record<string, unknown>;
 }
 
+function saveWalletSnapshot(walletManager: WalletManager): void {
+  fs.mkdirSync(path.dirname(walletSnapshotPath), { recursive: true });
+  const snapshot = walletManager.createRuntimeSnapshot();
+  fs.writeFileSync(walletSnapshotPath, JSON.stringify(snapshot, null, 2));
+}
+
+function loadWalletSnapshot(): WalletRuntimeSnapshot | null {
+  if (!fs.existsSync(walletSnapshotPath)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(walletSnapshotPath, 'utf8')) as WalletRuntimeSnapshot;
+  } catch {
+    return null;
+  }
+}
+
 program
   .name('bot')
   .description('Polymarket multi-strategy trading platform')
@@ -186,6 +202,20 @@ program
     const walletManager = new WalletManager();
     for (const wallet of config.wallets) {
       walletManager.registerWallet(wallet, wallet.strategy, config.environment.enableLiveTrading);
+    }
+
+    const runtimeSnapshot = loadWalletSnapshot();
+    if (runtimeSnapshot) {
+      const rehydration = walletManager.rehydrateFromRuntimeSnapshot(runtimeSnapshot);
+      logger.info(
+        {
+          snapshot: walletSnapshotPath,
+          restoredWallets: rehydration.restored,
+          skippedWallets: rehydration.skipped,
+          savedAt: runtimeSnapshot.savedAt,
+        },
+        'Applied wallet runtime rehydration snapshot',
+      );
     }
 
     if (config.environment.enableLiveTrading) {
@@ -224,6 +254,29 @@ program
     await engine.initialize();
     dashboardServer.setEngine(engine);
     engine.start();
+
+    // Persist runtime wallet state every 10 seconds for restart rehydration.
+    const snapshotTimer = setInterval(() => {
+      try {
+        saveWalletSnapshot(walletManager);
+      } catch (error) {
+        logger.warn({ err: String(error) }, 'Failed to persist wallet runtime snapshot');
+      }
+    }, 10_000);
+
+    const gracefulPersistAndExit = (signal: string): void => {
+      try {
+        clearInterval(snapshotTimer);
+        saveWalletSnapshot(walletManager);
+        logger.info({ signal, snapshot: walletSnapshotPath }, 'Saved wallet runtime snapshot before shutdown');
+      } catch (error) {
+        logger.warn({ err: String(error), signal }, 'Failed to save wallet runtime snapshot on shutdown');
+      }
+      process.exit(0);
+    };
+
+    process.once('SIGINT', () => gracefulPersistAndExit('SIGINT'));
+    process.once('SIGTERM', () => gracefulPersistAndExit('SIGTERM'));
 
     writeState({ status: 'running', startedAt: new Date().toISOString() });
   });

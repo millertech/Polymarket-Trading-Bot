@@ -61,6 +61,31 @@ export class PaperWallet {
     logger.info({ walletId: this.state.walletId, riskLimits: this.state.riskLimits }, 'Risk limits updated');
   }
 
+  rehydrateRuntimeState(snapshot: {
+    state: WalletState;
+    trades: TradeRecord[];
+    displayName?: string;
+  }): void {
+    // Keep mode/strategy/capital/risk from current config; restore dynamic runtime fields.
+    this.state.availableBalance = snapshot.state.availableBalance;
+    this.state.realizedPnl = snapshot.state.realizedPnl;
+    this.state.openPositions = (snapshot.state.openPositions ?? []).map((p) => ({ ...p }));
+
+    this.trades.splice(0, this.trades.length, ...(snapshot.trades ?? []).map((t) => ({ ...t })));
+    if (snapshot.displayName && snapshot.displayName.trim()) {
+      this.displayName = snapshot.displayName.trim();
+    }
+
+    logger.info(
+      {
+        walletId: this.state.walletId,
+        restoredPositions: this.state.openPositions.length,
+        restoredTrades: this.trades.length,
+      },
+      'Rehydrated PAPER wallet runtime state',
+    );
+  }
+
   async placeOrder(request: {
     marketId: string;
     outcome: 'YES' | 'NO';
