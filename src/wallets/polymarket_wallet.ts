@@ -28,6 +28,7 @@ export class PolymarketWallet {
   private readonly logDerivedL2Creds: boolean;
   private readonly forceDeriveL2Creds: boolean;
   private readonly maxClockSkewMs: number;
+  private readonly l2DeriveTimeoutMs: number;
   private displayName: string = '';
   private liveDisabledReason: string | null = null;
   private clobClient: ClobClient | null = null;
@@ -49,6 +50,10 @@ export class PolymarketWallet {
     this.maxClockSkewMs = Math.max(
       0,
       Number(process.env.POLYMARKET_MAX_CLOCK_SKEW_SEC ?? '60') * 1000,
+    );
+    this.l2DeriveTimeoutMs = Math.max(
+      1000,
+      Number(process.env.POLYMARKET_L2_DERIVE_TIMEOUT_MS ?? '15000'),
     );
     this.state = {
       walletId: config.id,
@@ -645,7 +650,11 @@ export class PolymarketWallet {
 
   private async deriveApiCreds(signer: Wallet): Promise<PolyApiCreds> {
     const tempClient = new ClobClient(this.clobApi, this.chainId, signer);
-    const derived = await tempClient.createOrDeriveApiKey();
+    const derived = await this.withTimeout(
+      tempClient.createOrDeriveApiKey(),
+      this.l2DeriveTimeoutMs,
+      `Timed out deriving Polymarket L2 API credentials after ${this.l2DeriveTimeoutMs}ms`,
+    );
     const creds = derived as Partial<PolyApiCreds> & { apiKey?: string };
     const key = creds.key ?? creds.apiKey;
 
@@ -659,6 +668,20 @@ export class PolymarketWallet {
       secret: creds.secret,
       passphrase: creds.passphrase,
     };
+  }
+
+  private async withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      return await Promise.race<T>([
+        promise,
+        new Promise<T>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private maybeLogL2Credentials(creds: PolyApiCreds, source: 'derived' | 'provided'): void {
