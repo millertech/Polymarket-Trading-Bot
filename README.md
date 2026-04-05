@@ -5,7 +5,7 @@
 ### The Most Advanced Open-Source Automated Trading Platform for Polymarket Prediction Markets
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.6-blue?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Node.js](https://img.shields.io/badge/Node.js-20.10+-green?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-18+-green?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Tests](https://img.shields.io/badge/Tests-106%20Passing-brightgreen?logo=vitest&logoColor=white)](https://vitest.dev/)
 [![License](https://img.shields.io/badge/License-MIT-yellow?logo=opensourceinitiative&logoColor=white)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](Dockerfile)
@@ -124,7 +124,7 @@ The platform includes an enterprise-level **whale tracking engine** that auto-di
 
 ### Prerequisites
 
-- **Node.js** 20.10+ ([download](https://nodejs.org/))
+- **Node.js** 18+ ([download](https://nodejs.org/))
 - **npm** (comes with Node.js)
 - **Git** ([download](https://git-scm.com/))
 

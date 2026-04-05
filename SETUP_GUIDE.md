@@ -23,7 +23,7 @@
 
 You need two things installed on your computer:
 
-### Install Node.js (version 20.10 or higher)
+### Install Node.js (version 18 or higher)
 
 <details>
 <summary><strong>🍎 Mac</strong></summary>
@@ -408,20 +408,6 @@ Node.js is not installed. Go back to [Step 1](#step-1-install-the-prerequisites)
 ### "command not found: npm"
 
 npm comes with Node.js. Reinstall Node.js from [Step 1](#step-1-install-the-prerequisites).
-
-### "Unsupported engine" or install fails after adding CLOB client
-
-This project now uses the official Polymarket CLOB SDK, which requires Node.js `20.10+`.
-
-Check your version:
-```bash
-node -v
-```
-
-If below `v20.10.0`, upgrade Node and run:
-```bash
-npm install
-```
 
 ### "POLYMARKET_PRIVATE_KEY not set" or "POLYMARKET_FUNDER_ADDRESS not set"
 
