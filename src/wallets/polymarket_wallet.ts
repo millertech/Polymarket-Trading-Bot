@@ -26,9 +26,11 @@ export class PolymarketWallet {
   private readonly gammaApi: string;
   private readonly chainId: number;
   private readonly logDerivedL2Creds: boolean;
+  private readonly forceDeriveL2Creds: boolean;
   private displayName: string = '';
   private liveDisabledReason: string | null = null;
   private clobClient: ClobClient | null = null;
+  private activeCredSource: 'provided' | 'derived' | null = null;
   private readonly marketTokenCache = new Map<string, string[]>();
 
   private static isTruthyEnv(value?: string): boolean {
@@ -42,6 +44,7 @@ export class PolymarketWallet {
     this.gammaApi = process.env.POLYMARKET_GAMMA_API ?? 'https://gamma-api.polymarket.com';
     this.chainId = Number(process.env.POLYMARKET_CHAIN_ID ?? '137');
     this.logDerivedL2Creds = PolymarketWallet.isTruthyEnv(process.env.POLYMARKET_LOG_DERIVED_L2);
+    this.forceDeriveL2Creds = PolymarketWallet.isTruthyEnv(process.env.POLYMARKET_FORCE_DERIVE_L2);
     this.state = {
       walletId: config.id,
       mode: 'LIVE',
@@ -219,10 +222,36 @@ export class PolymarketWallet {
         side: request.side === 'BUY' ? Side.BUY : Side.SELL,
       });
     } catch (err) {
-      const details = this.stringifyUnknown(err);
+      let details = this.stringifyUnknown(err);
+
+      // If env L2 creds are stale, force one retry with fresh derived creds.
+      if (this.isInvalidSignatureError(details) && this.activeCredSource === 'provided') {
+        logger.warn(
+          {
+            walletId: this.state.walletId,
+            orderId,
+            marketId: request.marketId,
+            tokenId,
+          },
+          'CLOB returned invalid signature while using provided L2 creds; retrying with freshly derived L2 credentials',
+        );
+
+        this.resetClobClient();
+        try {
+          client = await this.getClobClient(true);
+          orderResponse = await this.submitClobOrder(client, {
+            tokenID: tokenId,
+            price: normalizedPrice,
+            size: normalizedSize,
+            side: request.side === 'BUY' ? Side.BUY : Side.SELL,
+          });
+        } catch (retryErr) {
+          details = this.stringifyUnknown(retryErr);
+        }
+      }
 
       // Some strategies emit marketId without tokenId; if token lookup was stale, refresh once.
-      if (details.toLowerCase().includes('market not found')) {
+      if (orderResponse === undefined && details.toLowerCase().includes('market not found')) {
         const refreshed = await this.resolveOrderTokenId(request, true).catch(() => null);
         if (refreshed && refreshed !== tokenId) {
           logger.warn({ walletId: this.state.walletId, orderId, oldTokenId: tokenId, newTokenId: refreshed }, 'Retrying LIVE order with refreshed CLOB token ID');
@@ -512,7 +541,7 @@ export class PolymarketWallet {
     return { ok: true };
   }
 
-  private async getClobClient(): Promise<ClobClient> {
+  private async getClobClient(forceDeriveCreds = false): Promise<ClobClient> {
     if (this.clobClient) return this.clobClient;
 
     const validation = this.validateLiveCredentialInputs();
@@ -525,8 +554,10 @@ export class PolymarketWallet {
     const signatureType = Number(process.env.POLYMARKET_SIGNATURE_TYPE ?? '2');
     const signer = new Wallet(privateKey);
 
-    const providedCreds = this.readProvidedApiCreds();
+    const shouldForceDerive = forceDeriveCreds || this.forceDeriveL2Creds;
+    const providedCreds = shouldForceDerive ? null : this.readProvidedApiCreds();
     const apiCreds = providedCreds ?? await this.deriveApiCreds(signer);
+    this.activeCredSource = providedCreds ? 'provided' : 'derived';
     this.maybeLogL2Credentials(apiCreds, providedCreds ? 'provided' : 'derived');
 
     this.clobClient = new ClobClient(
@@ -540,12 +571,23 @@ export class PolymarketWallet {
     return this.clobClient;
   }
 
+  private resetClobClient(): void {
+    this.clobClient = null;
+    this.activeCredSource = null;
+  }
+
   private readProvidedApiCreds(): PolyApiCreds | null {
     const apiKey = process.env.POLYMARKET_API_KEY;
     const secret = process.env.POLYMARKET_API_SECRET;
     const passphrase = process.env.POLYMARKET_API_PASSPHRASE;
     if (!apiKey || !secret || !passphrase) return null;
-    return { key: apiKey, secret, passphrase };
+
+    const key = apiKey.trim();
+    const sec = secret.trim();
+    const pass = passphrase.trim();
+    if (!key || !sec || !pass) return null;
+
+    return { key, secret: sec, passphrase: pass };
   }
 
   private async deriveApiCreds(signer: Wallet): Promise<PolyApiCreds> {
@@ -735,6 +777,11 @@ export class PolymarketWallet {
     if (r.success === false) return false;
 
     return true;
+  }
+
+  private isInvalidSignatureError(details: string): boolean {
+    const text = details.toLowerCase();
+    return text.includes('invalid signature');
   }
 
   private pickDiagnosticHeaders(response: Response): Record<string, string> {

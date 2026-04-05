@@ -155,6 +155,9 @@ POLYMARKET_API_KEY=
 POLYMARKET_API_SECRET=
 POLYMARKET_API_PASSPHRASE=
 
+# Optional: force bot to ignore provided L2 and derive fresh L2 each start.
+POLYMARKET_FORCE_DERIVE_L2=false
+
 # Optional: print derived L2 creds once in logs (SENSITIVE)
 POLYMARKET_LOG_DERIVED_L2=false
 
@@ -246,6 +249,7 @@ Exactly what to copy from your Polymarket account and where to put it:
 
 Important:
 - If L2 values are empty, the bot derives them automatically from your private key.
+- If you get `invalid signature` while L2 values are set, try `POLYMARKET_FORCE_DERIVE_L2=true` to force fresh derived L2 creds.
 - Use `POLYMARKET_SIGNATURE_TYPE=2` for most users.
 - If you want the bot to print the exact derived values, temporarily set `POLYMARKET_LOG_DERIVED_L2=true`, run once, copy values, then set it back to `false`.
 
