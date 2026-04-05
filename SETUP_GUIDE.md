@@ -158,6 +158,9 @@ POLYMARKET_API_PASSPHRASE=
 # Optional: force bot to ignore provided L2 and derive fresh L2 each start.
 POLYMARKET_FORCE_DERIVE_L2=false
 
+# Optional: max allowed local clock drift vs CLOB server time before LIVE is disabled.
+POLYMARKET_MAX_CLOCK_SKEW_SEC=60
+
 # Optional: print derived L2 creds once in logs (SENSITIVE)
 POLYMARKET_LOG_DERIVED_L2=false
 
@@ -470,6 +473,19 @@ Common fix:
 - Clear `POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, and `POLYMARKET_API_PASSPHRASE` to let the bot re-derive L2 creds from L1.
 - Verify `POLYMARKET_SIGNATURE_TYPE` and `POLYMARKET_FUNDER_ADDRESS`, then restart.
 - To print the derived L2 values for copy/paste, set `POLYMARKET_LOG_DERIVED_L2=true` for one run, then disable it immediately.
+
+If this still fails, check system time drift (especially on Raspberry Pi):
+
+```bash
+date -u
+curl -sI https://clob.polymarket.com/ | grep -i '^date:'
+timedatectl status
+sudo timedatectl set-ntp true
+sudo systemctl restart systemd-timesyncd
+timedatectl status
+```
+
+Then restart the bot. The wallet preflight now rejects LIVE mode when drift exceeds `POLYMARKET_MAX_CLOCK_SKEW_SEC`.
 
 ### "LIVE trading requested but ENABLE_LIVE_TRADING is false"
 

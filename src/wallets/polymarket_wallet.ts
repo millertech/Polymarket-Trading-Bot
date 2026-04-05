@@ -27,6 +27,7 @@ export class PolymarketWallet {
   private readonly chainId: number;
   private readonly logDerivedL2Creds: boolean;
   private readonly forceDeriveL2Creds: boolean;
+  private readonly maxClockSkewMs: number;
   private displayName: string = '';
   private liveDisabledReason: string | null = null;
   private clobClient: ClobClient | null = null;
@@ -45,6 +46,10 @@ export class PolymarketWallet {
     this.chainId = Number(process.env.POLYMARKET_CHAIN_ID ?? '137');
     this.logDerivedL2Creds = PolymarketWallet.isTruthyEnv(process.env.POLYMARKET_LOG_DERIVED_L2);
     this.forceDeriveL2Creds = PolymarketWallet.isTruthyEnv(process.env.POLYMARKET_FORCE_DERIVE_L2);
+    this.maxClockSkewMs = Math.max(
+      0,
+      Number(process.env.POLYMARKET_MAX_CLOCK_SKEW_SEC ?? '60') * 1000,
+    );
     this.state = {
       walletId: config.id,
       mode: 'LIVE',
@@ -106,6 +111,23 @@ export class PolymarketWallet {
       return { ok: false, reason, details: { clobReachability } };
     }
 
+    const clockSkew = this.checkClockSkew(clobReachability.headers?.date);
+    if (!clockSkew.ok) {
+      const reason = clockSkew.reason ?? 'System clock skew check failed';
+      this.switchToPaperFallback(reason);
+      return {
+        ok: false,
+        reason,
+        details: {
+          maxClockSkewMs: this.maxClockSkewMs,
+          skewMs: clockSkew.skewMs,
+          serverIso: clockSkew.serverIso,
+          localIso: clockSkew.localIso,
+          serverDateHeader: clobReachability.headers?.date,
+        },
+      };
+    }
+
     try {
       await this.getClobClient();
     } catch (err) {
@@ -123,6 +145,8 @@ export class PolymarketWallet {
         signatureType: Number(process.env.POLYMARKET_SIGNATURE_TYPE ?? '2'),
         signerAddress,
         funderAddress: process.env.POLYMARKET_FUNDER_ADDRESS,
+        clockSkewMs: clockSkew.skewMs,
+        maxClockSkewMs: this.maxClockSkewMs,
       },
       'LIVE preflight passed with official CLOB auth flow',
     );
@@ -782,6 +806,67 @@ export class PolymarketWallet {
   private isInvalidSignatureError(details: string): boolean {
     const text = details.toLowerCase();
     return text.includes('invalid signature');
+  }
+
+  private checkClockSkew(serverDateHeader?: string): {
+    ok: boolean;
+    reason?: string;
+    skewMs?: number;
+    serverIso?: string;
+    localIso?: string;
+  } {
+    if (!serverDateHeader) {
+      logger.warn(
+        { walletId: this.state.walletId },
+        'CLOB preflight did not include a Date header; skipping clock skew check',
+      );
+      return { ok: true };
+    }
+
+    const serverMs = Date.parse(serverDateHeader);
+    if (Number.isNaN(serverMs)) {
+      logger.warn(
+        { walletId: this.state.walletId, serverDateHeader },
+        'Unable to parse CLOB Date header; skipping clock skew check',
+      );
+      return { ok: true };
+    }
+
+    const localMs = Date.now();
+    const skewMs = Math.abs(localMs - serverMs);
+    const serverIso = new Date(serverMs).toISOString();
+    const localIso = new Date(localMs).toISOString();
+
+    if (skewMs > this.maxClockSkewMs) {
+      const reason = `System clock drift too high (${Math.round(skewMs / 1000)}s > ${Math.round(this.maxClockSkewMs / 1000)}s); sync system time before LIVE trading`;
+      logger.error(
+        {
+          walletId: this.state.walletId,
+          skewMs,
+          maxClockSkewMs: this.maxClockSkewMs,
+          serverIso,
+          localIso,
+          serverDateHeader,
+        },
+        reason,
+      );
+      return { ok: false, reason, skewMs, serverIso, localIso };
+    }
+
+    if (skewMs > 5_000) {
+      logger.warn(
+        {
+          walletId: this.state.walletId,
+          skewMs,
+          maxClockSkewMs: this.maxClockSkewMs,
+          serverIso,
+          localIso,
+        },
+        'Detected moderate system clock skew during CLOB preflight',
+      );
+    }
+
+    return { ok: true, skewMs, serverIso, localIso };
   }
 
   private pickDiagnosticHeaders(response: Response): Record<string, string> {
