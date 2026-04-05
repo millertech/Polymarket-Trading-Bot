@@ -527,7 +527,7 @@ export class PolymarketWallet {
     );
 
     consoleLog.warn(
-      'AUTH',
+      'SYSTEM',
       '[SENSITIVE] L2 creds for .env (keep private):\n'
       + `POLYMARKET_API_KEY=${creds.key}\n`
       + `POLYMARKET_API_SECRET=${creds.secret}\n`
