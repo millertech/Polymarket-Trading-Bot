@@ -11,7 +11,7 @@ type LivePreflightResult = {
 };
 
 type PolyApiCreds = {
-  apiKey: string;
+  key: string;
   secret: string;
   passphrase: string;
 };
@@ -460,21 +460,22 @@ export class PolymarketWallet {
     const secret = process.env.POLYMARKET_API_SECRET;
     const passphrase = process.env.POLYMARKET_API_PASSPHRASE;
     if (!apiKey || !secret || !passphrase) return null;
-    return { apiKey, secret, passphrase };
+    return { key: apiKey, secret, passphrase };
   }
 
   private async deriveApiCreds(signer: Wallet): Promise<PolyApiCreds> {
     const tempClient = new ClobClient(this.clobApi, this.chainId, signer);
     const derived = await tempClient.createOrDeriveApiKey();
-    const creds = derived as Partial<PolyApiCreds>;
+    const creds = derived as Partial<PolyApiCreds> & { apiKey?: string };
+    const key = creds.key ?? creds.apiKey;
 
-    if (!creds.apiKey || !creds.secret || !creds.passphrase) {
-      throw new Error('Failed to derive valid Polymarket L2 API credentials (apiKey/secret/passphrase)');
+    if (!key || !creds.secret || !creds.passphrase) {
+      throw new Error('Failed to derive valid Polymarket L2 API credentials (key/secret/passphrase)');
     }
 
     logger.info({ walletId: this.state.walletId }, 'Derived Polymarket L2 API credentials via official CLOB flow');
     return {
-      apiKey: creds.apiKey,
+      key,
       secret: creds.secret,
       passphrase: creds.passphrase,
     };
