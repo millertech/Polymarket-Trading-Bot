@@ -188,6 +188,13 @@ function loadWalletSnapshot(): WalletRuntimeSnapshot | null {
   }
 }
 
+function shouldClearWalletRuntimeOnStart(enableLiveTrading: boolean): boolean {
+  if (enableLiveTrading) return true;
+  const raw = process.env.CLEAR_WALLET_RUNTIME_ON_START;
+  if (!raw) return false;
+  return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
+}
+
 program
   .name('bot')
   .description('Polymarket multi-strategy trading platform')
@@ -204,7 +211,21 @@ program
       walletManager.registerWallet(wallet, wallet.strategy, config.environment.enableLiveTrading);
     }
 
-    const runtimeSnapshot = loadWalletSnapshot();
+    const clearRuntimeOnStart = shouldClearWalletRuntimeOnStart(config.environment.enableLiveTrading);
+    if (clearRuntimeOnStart && fs.existsSync(walletSnapshotPath)) {
+      fs.rmSync(walletSnapshotPath, { force: true });
+      logger.info(
+        {
+          snapshot: walletSnapshotPath,
+          reason: config.environment.enableLiveTrading
+            ? 'live trading startup'
+            : 'CLEAR_WALLET_RUNTIME_ON_START=true',
+        },
+        'Cleared wallet runtime snapshot before startup',
+      );
+    }
+
+    const runtimeSnapshot = clearRuntimeOnStart ? null : loadWalletSnapshot();
     if (runtimeSnapshot) {
       const rehydration = walletManager.rehydrateFromRuntimeSnapshot(runtimeSnapshot);
       logger.info(

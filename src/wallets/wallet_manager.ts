@@ -50,11 +50,10 @@ export class WalletManager {
     }
 
     if (config.mode === 'LIVE' && !enableLive) {
-      logger.warn(
-        { walletId: config.id },
-        'LIVE trading requested but ENABLE_LIVE_TRADING is false — falling back to PAPER mode',
+      throw new Error(
+        `Wallet ${config.id} is configured as LIVE but live trading is not fully enabled `
+        + '(require both config.environment.enable_live_trading=true and ENABLE_LIVE_TRADING=true)',
       );
-      config = { ...config, mode: 'PAPER' };
     }
 
     const wallet =
@@ -121,6 +120,8 @@ export class WalletManager {
   }
 
   async runLivePreflight(): Promise<void> {
+    const failures: Array<{ walletId: string; reason: string; details?: Record<string, unknown> }> = [];
+
     for (const [walletId, wallet] of this.wallets.entries()) {
       if (!wallet.preflightLiveAccess) continue;
       const state = wallet.getState();
@@ -128,10 +129,22 @@ export class WalletManager {
 
       const result = await wallet.preflightLiveAccess();
       if (!result.ok) {
-        logger.warn({ walletId, reason: result.reason, details: result.details }, 'LIVE preflight failed; wallet fallback applied');
+        failures.push({
+          walletId,
+          reason: result.reason ?? 'unknown reason',
+          details: result.details,
+        });
+        logger.error({ walletId, reason: result.reason, details: result.details }, 'LIVE preflight failed');
       } else {
         logger.info({ walletId, details: result.details }, 'LIVE preflight succeeded');
       }
+    }
+
+    if (failures.length > 0) {
+      const summary = failures
+        .map((f) => `${f.walletId}: ${f.reason}`)
+        .join('; ');
+      throw new Error(`LIVE preflight failed for ${failures.length} wallet(s): ${summary}`);
     }
   }
 

@@ -30,7 +30,6 @@ export class PolymarketWallet {
   private readonly maxClockSkewMs: number;
   private readonly l2DeriveTimeoutMs: number;
   private displayName: string = '';
-  private liveDisabledReason: string | null = null;
   private clobClient: ClobClient | null = null;
   private activeCredSource: 'provided' | 'derived' | null = null;
   private readonly marketTokenCache = new Map<string, string[]>();
@@ -130,21 +129,18 @@ export class PolymarketWallet {
   async preflightLiveAccess(): Promise<LivePreflightResult> {
     const credValidation = this.validateLiveCredentialInputs();
     if (!credValidation.ok) {
-      this.switchToPaperFallback(credValidation.reason);
       return { ok: false, reason: credValidation.reason };
     }
 
     const clobReachability = await this.safeFetch(`${this.clobApi}/`, { method: 'GET' });
     if (!clobReachability.ok) {
       const reason = `CLOB preflight failed (${clobReachability.error ?? 'unknown'})`;
-      this.switchToPaperFallback(reason);
       return { ok: false, reason, details: { clobReachability } };
     }
 
     const clockSkew = this.checkClockSkew(clobReachability.headers?.date);
     if (!clockSkew.ok) {
       const reason = clockSkew.reason ?? 'System clock skew check failed';
-      this.switchToPaperFallback(reason);
       return {
         ok: false,
         reason,
@@ -162,7 +158,6 @@ export class PolymarketWallet {
       await this.getClobClient();
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      this.switchToPaperFallback(reason);
       return { ok: false, reason };
     }
 
@@ -198,8 +193,7 @@ export class PolymarketWallet {
     size: number;
   }): Promise<void> {
     if (this.state.mode === 'PAPER') {
-      this.placePaperFallbackOrder(request, this.liveDisabledReason ?? 'LIVE wallet running in PAPER fallback mode');
-      return;
+      throw new Error(`Wallet ${this.state.walletId} is in PAPER mode; LIVE orders are not permitted`);
     }
 
     let tokenId: string;
@@ -338,9 +332,7 @@ export class PolymarketWallet {
         }, msg);
         consoleLog.error('ORDER', `[${this.state.walletId}] ${msg}`);
         if (this.isTradingRestrictedError(details)) {
-          this.switchToPaperFallback(`Trading restricted: ${details}`);
-          this.placePaperFallbackOrder(request, 'Falling back after LIVE trading restriction');
-          return;
+          throw new Error(`LIVE trading restricted: ${details}`);
         }
         throw new Error(msg);
       }
@@ -461,82 +453,6 @@ export class PolymarketWallet {
     }
 
     this.state.openPositions = this.state.openPositions.filter((p) => p.size > 0);
-  }
-
-  private placePaperFallbackOrder(
-    request: {
-      marketId: string;
-      outcome: 'YES' | 'NO';
-      side: 'BUY' | 'SELL';
-      price: number;
-      size: number;
-    },
-    reason: string,
-  ): void {
-    const orderId = `paper-fallback-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const cost = request.price * request.size;
-    const entryPrice = this.getExistingEntryPrice(request.marketId, request.outcome);
-
-    this.applyFill({
-      marketId: request.marketId,
-      outcome: request.outcome,
-      side: request.side,
-      price: request.price,
-      size: request.size,
-    });
-
-    const realizedPnl = request.side === 'SELL' && entryPrice > 0
-      ? (request.price - entryPrice) * request.size
-      : 0;
-    this.state.realizedPnl += realizedPnl;
-    const signedCost = cost * (request.side === 'BUY' ? 1 : -1);
-    this.state.availableBalance -= signedCost;
-
-    this.trades.push({
-      orderId,
-      walletId: this.state.walletId,
-      marketId: request.marketId,
-      outcome: request.outcome,
-      side: request.side,
-      price: request.price,
-      size: request.size,
-      cost,
-      realizedPnl,
-      cumulativePnl: this.state.realizedPnl,
-      balanceAfter: this.state.availableBalance,
-      timestamp: Date.now(),
-    });
-    if (this.trades.length > PolymarketWallet.MAX_TRADE_HISTORY) {
-      this.trades.splice(0, this.trades.length - PolymarketWallet.MAX_TRADE_HISTORY);
-    }
-
-    consoleLog.warn(
-      'ORDER',
-      `[${this.state.walletId}] Executed in PAPER fallback (${reason}) ${request.side} ${request.outcome} ×${request.size} @ $${request.price}`,
-      {
-        walletId: this.state.walletId,
-        strategy: this.state.assignedStrategy,
-        mode: this.state.mode,
-        reason,
-        marketId: request.marketId,
-        outcome: request.outcome,
-        side: request.side,
-        price: request.price,
-        size: request.size,
-      },
-    );
-  }
-
-  private switchToPaperFallback(reason: string): void {
-    if (this.state.mode === 'PAPER') return;
-    this.state.mode = 'PAPER';
-    this.liveDisabledReason = reason;
-    logger.warn({ walletId: this.state.walletId, reason }, 'LIVE wallet switched to PAPER fallback');
-    consoleLog.warn('ORDER', `[${this.state.walletId}] LIVE disabled; switched to PAPER fallback. Reason: ${reason}`, {
-      walletId: this.state.walletId,
-      strategy: this.state.assignedStrategy,
-      reason,
-    });
   }
 
   private isTradingRestrictedError(body: string): boolean {
