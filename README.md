@@ -5,7 +5,7 @@
 ### The Most Advanced Open-Source Automated Trading Platform for Polymarket Prediction Markets
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.6-blue?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Node.js](https://img.shields.io/badge/Node.js-18+-green?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-20.10+-green?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Tests](https://img.shields.io/badge/Tests-106%20Passing-brightgreen?logo=vitest&logoColor=white)](https://vitest.dev/)
 [![License](https://img.shields.io/badge/License-MIT-yellow?logo=opensourceinitiative&logoColor=white)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](Dockerfile)
@@ -124,7 +124,7 @@ The platform includes an enterprise-level **whale tracking engine** that auto-di
 
 ### Prerequisites
 
-- **Node.js** 18+ ([download](https://nodejs.org/))
+- **Node.js** 20.10+ ([download](https://nodejs.org/))
 - **npm** (comes with Node.js)
 - **Git** ([download](https://git-scm.com/))
 
@@ -622,6 +622,21 @@ POLYMARKET_API_KEY=
 POLYMARKET_API_SECRET=
 POLYMARKET_API_PASSPHRASE=
 ```
+
+**Exactly what to copy from Polymarket and where to paste it:**
+
+| What you get from Polymarket | Where to find it in account UI | Paste into `.env` | Required |
+|---|---|---|---|
+| Private key for your trading signer (L1) | Account export / wallet export flow | `POLYMARKET_PRIVATE_KEY=0x...` | Yes |
+| Proxy wallet (funder) address that holds your Polymarket funds | Profile/account wallet address | `POLYMARKET_FUNDER_ADDRESS=0x...` | Yes |
+| Signature type for that wallet | Wallet/account type (EOA, POLY_PROXY, GNOSIS_SAFE) | `POLYMARKET_SIGNATURE_TYPE=0|1|2` | Yes |
+| L2 API key | API credentials page (if you created one) | `POLYMARKET_API_KEY=...` | No |
+| L2 API secret | API credentials page (if you created one) | `POLYMARKET_API_SECRET=...` | No |
+| L2 API passphrase | API credentials page (if you created one) | `POLYMARKET_API_PASSPHRASE=...` | No |
+
+Notes:
+- If you leave the L2 fields blank, the bot derives them from your private key using the official CLOB flow.
+- Most users should use `POLYMARKET_SIGNATURE_TYPE=2` (GNOSIS_SAFE). Use `1` only for POLY_PROXY accounts and `0` only for true standalone EOA flow.
 
 **3. Edit `config.yaml`:**
 ```yaml

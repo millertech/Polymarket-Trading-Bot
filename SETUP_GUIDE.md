@@ -23,7 +23,7 @@
 
 You need two things installed on your computer:
 
-### Install Node.js (version 18 or higher)
+### Install Node.js (version 20.10 or higher)
 
 <details>
 <summary><strong>🍎 Mac</strong></summary>
@@ -230,6 +230,21 @@ POLYMARKET_API_SECRET=
 POLYMARKET_API_PASSPHRASE=
 ```
 
+Exactly what to copy from your Polymarket account and where to put it:
+
+| Get this value | Where to find it | Put it here in `.env` | Required |
+|---|---|---|---|
+| Trading signer private key (L1) | Account export / wallet export | `POLYMARKET_PRIVATE_KEY=0x...` | Yes |
+| Proxy/funder wallet address | Profile/account wallet address | `POLYMARKET_FUNDER_ADDRESS=0x...` | Yes |
+| Wallet signature type | Wallet/account type | `POLYMARKET_SIGNATURE_TYPE=0|1|2` | Yes |
+| API key (L2) | API credentials page | `POLYMARKET_API_KEY=...` | Optional |
+| API secret (L2) | API credentials page | `POLYMARKET_API_SECRET=...` | Optional |
+| API passphrase (L2) | API credentials page | `POLYMARKET_API_PASSPHRASE=...` | Optional |
+
+Important:
+- If L2 values are empty, the bot derives them automatically from your private key.
+- Use `POLYMARKET_SIGNATURE_TYPE=2` for most users.
+
 ### 3. Update `config.yaml`
 
 Open `config.yaml` in a text editor and change:
@@ -393,6 +408,20 @@ Node.js is not installed. Go back to [Step 1](#step-1-install-the-prerequisites)
 ### "command not found: npm"
 
 npm comes with Node.js. Reinstall Node.js from [Step 1](#step-1-install-the-prerequisites).
+
+### "Unsupported engine" or install fails after adding CLOB client
+
+This project now uses the official Polymarket CLOB SDK, which requires Node.js `20.10+`.
+
+Check your version:
+```bash
+node -v
+```
+
+If below `v20.10.0`, upgrade Node and run:
+```bash
+npm install
+```
 
 ### "POLYMARKET_PRIVATE_KEY not set" or "POLYMARKET_FUNDER_ADDRESS not set"
 
