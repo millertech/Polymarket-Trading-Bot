@@ -21,14 +21,17 @@ export class PolymarketWallet {
   private state: WalletState;
   private readonly trades: TradeRecord[] = [];
   private readonly clobApi: string;
+  private readonly gammaApi: string;
   private readonly chainId: number;
   private displayName: string = '';
   private liveDisabledReason: string | null = null;
   private clobClient: ClobClient | null = null;
+  private readonly marketTokenCache = new Map<string, string[]>();
 
   constructor(config: WalletConfig, assignedStrategy: string) {
     this.displayName = config.id;
     this.clobApi = process.env.POLYMARKET_CLOB_API ?? 'https://clob.polymarket.com';
+    this.gammaApi = process.env.POLYMARKET_GAMMA_API ?? 'https://gamma-api.polymarket.com';
     this.chainId = Number(process.env.POLYMARKET_CHAIN_ID ?? '137');
     this.state = {
       walletId: config.id,
@@ -122,9 +125,11 @@ export class PolymarketWallet {
       return;
     }
 
-    const tokenId = request.tokenId ?? request.marketId;
-    if (!tokenId) {
-      const msg = 'Missing tokenId for LIVE order. Provide a CLOB token ID for order placement.';
+    let tokenId: string;
+    try {
+      tokenId = await this.resolveOrderTokenId(request);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
       logger.error({ walletId: this.state.walletId }, msg);
       consoleLog.error('ORDER', `[${this.state.walletId}] ${msg}`);
       throw new Error(msg);
@@ -176,20 +181,51 @@ export class PolymarketWallet {
       );
     } catch (err) {
       const details = this.stringifyUnknown(err);
-      const msg = `LIVE order rejected by Polymarket: ${details}`;
-      logger.error({
-        walletId: this.state.walletId,
-        orderId,
-        tokenId,
-        error: details,
-      }, msg);
-      consoleLog.error('ORDER', `[${this.state.walletId}] ${msg}`);
-      if (this.isTradingRestrictedError(details)) {
-        this.switchToPaperFallback(`Trading restricted: ${details}`);
-        this.placePaperFallbackOrder(request, 'Falling back after LIVE trading restriction');
-        return;
+
+      // Some strategies emit marketId without tokenId; if token lookup was stale, refresh once.
+      if (details.toLowerCase().includes('market not found')) {
+        const refreshed = await this.resolveOrderTokenId(request, true).catch(() => null);
+        if (refreshed && refreshed !== tokenId) {
+          logger.warn({ walletId: this.state.walletId, orderId, oldTokenId: tokenId, newTokenId: refreshed }, 'Retrying LIVE order with refreshed CLOB token ID');
+          try {
+            orderResponse = await client.createAndPostOrder(
+              {
+                tokenID: refreshed,
+                price: request.price,
+                size: request.size,
+                side: request.side === 'BUY' ? Side.BUY : Side.SELL,
+              },
+              {
+                tickSize: '0.01',
+                negRisk: false,
+              },
+              OrderType.GTC,
+            );
+            tokenId = refreshed;
+          } catch {
+            // keep original error handling below
+          }
+        }
       }
-      throw new Error(msg);
+
+      if (orderResponse !== undefined) {
+        // Retry succeeded; continue to post-fill state updates.
+      } else {
+        const msg = `LIVE order rejected by Polymarket: ${details}`;
+        logger.error({
+          walletId: this.state.walletId,
+          orderId,
+          tokenId,
+          error: details,
+        }, msg);
+        consoleLog.error('ORDER', `[${this.state.walletId}] ${msg}`);
+        if (this.isTradingRestrictedError(details)) {
+          this.switchToPaperFallback(`Trading restricted: ${details}`);
+          this.placePaperFallbackOrder(request, 'Falling back after LIVE trading restriction');
+          return;
+        }
+        throw new Error(msg);
+      }
     }
 
     /* ── Order accepted — update local state ── */
@@ -489,6 +525,88 @@ export class PolymarketWallet {
     } catch {
       return String(value);
     }
+  }
+
+  private async resolveOrderTokenId(
+    request: { marketId: string; tokenId?: string; outcome: 'YES' | 'NO' },
+    forceRefresh = false,
+  ): Promise<string> {
+    // If strategy provided tokenId explicitly, trust it.
+    if (request.tokenId && request.tokenId.trim()) {
+      return request.tokenId.trim();
+    }
+
+    const marketId = request.marketId?.trim();
+    if (!marketId) {
+      throw new Error('Missing marketId/tokenId for LIVE order; cannot resolve CLOB token ID');
+    }
+
+    let tokenIds = !forceRefresh ? this.marketTokenCache.get(marketId) : undefined;
+    if (!tokenIds || tokenIds.length === 0) {
+      tokenIds = await this.fetchGammaTokenIds(marketId);
+      if (tokenIds.length > 0) this.marketTokenCache.set(marketId, tokenIds);
+    }
+
+    if (!tokenIds || tokenIds.length === 0) {
+      throw new Error(`No CLOB token IDs found for market ${marketId}; order skipped`);
+    }
+
+    const idx = request.outcome === 'YES' ? 0 : 1;
+    return tokenIds[idx] ?? tokenIds[0];
+  }
+
+  private async fetchGammaTokenIds(marketId: string): Promise<string[]> {
+    const candidates = [
+      `${this.gammaApi}/markets/${encodeURIComponent(marketId)}`,
+      `${this.gammaApi}/markets?id=${encodeURIComponent(marketId)}`,
+    ];
+
+    for (const url of candidates) {
+      const resp = await this.safeFetch(url, { method: 'GET' });
+      if (!resp.ok || !resp.body) continue;
+
+      const parsed = this.safeParseJson(resp.body);
+      const tokenIds = this.extractTokenIds(parsed);
+      if (tokenIds.length > 0) {
+        logger.info({ walletId: this.state.walletId, marketId, tokenIds, source: url }, 'Resolved CLOB token IDs from Gamma');
+        return tokenIds;
+      }
+    }
+
+    logger.warn({ walletId: this.state.walletId, marketId }, 'Failed to resolve CLOB token IDs from Gamma');
+    return [];
+  }
+
+  private safeParseJson(text: string): unknown {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null;
+    }
+  }
+
+  private extractTokenIds(payload: unknown): string[] {
+    const market = Array.isArray(payload)
+      ? (payload[0] as { clobTokenIds?: unknown } | undefined)
+      : (payload as { clobTokenIds?: unknown } | null);
+
+    const raw = market?.clobTokenIds;
+    if (Array.isArray(raw)) {
+      return raw.map((v) => String(v)).filter((v) => v.length > 0);
+    }
+
+    if (typeof raw === 'string') {
+      try {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) {
+          return arr.map((v) => String(v)).filter((v) => v.length > 0);
+        }
+      } catch {
+        // ignore malformed clobTokenIds
+      }
+    }
+
+    return [];
   }
 
   private pickDiagnosticHeaders(response: Response): Record<string, string> {
