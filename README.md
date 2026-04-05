@@ -504,7 +504,14 @@ copy .env.example .env     # Windows
 | Variable | Required? | Default | Description |
 |----------|-----------|---------|-------------|
 | `ENABLE_LIVE_TRADING` | For live trading | `false` | Set to `true` to allow real trades |
-| `POLYMARKET_API_KEY` | For live trading | *(empty)* | Your Polymarket API key |
+| `POLYMARKET_PRIVATE_KEY` | For live trading | *(empty)* | L1 signer private key used to sign/derive CLOB auth |
+| `POLYMARKET_FUNDER_ADDRESS` | For live trading | *(empty)* | Proxy/funder wallet address that holds funds |
+| `POLYMARKET_SIGNATURE_TYPE` | For live trading | `2` | `0=EOA`, `1=POLY_PROXY`, `2=GNOSIS_SAFE` |
+| `POLYMARKET_CHAIN_ID` | For live trading | `137` | Polygon network id |
+| `POLYMARKET_API_KEY` | Optional | *(empty)* | L2 API key (auto-derived if omitted) |
+| `POLYMARKET_API_SECRET` | Optional | *(empty)* | L2 API secret (auto-derived if omitted) |
+| `POLYMARKET_API_PASSPHRASE` | Optional | *(empty)* | L2 API passphrase (auto-derived if omitted) |
+| `POLYMARKET_CLOB_API` | No | `https://clob.polymarket.com` | CLOB base URL override |
 | `DASHBOARD_PORT` | No | `3000` | Which port the dashboard runs on |
 | `LOG_LEVEL` | No | `info` | Logging detail: `debug`, `info`, `warn`, `error` |
 | `SCANNER_FETCH_TIMEOUT_MS` | No | `20000` | Whale data fetch timeout (ms) |
@@ -517,7 +524,14 @@ copy .env.example .env     # Windows
 
 ```env
 ENABLE_LIVE_TRADING=false
+POLYMARKET_PRIVATE_KEY=
+POLYMARKET_FUNDER_ADDRESS=
+POLYMARKET_SIGNATURE_TYPE=2
+POLYMARKET_CHAIN_ID=137
 POLYMARKET_API_KEY=
+POLYMARKET_API_SECRET=
+POLYMARKET_API_PASSPHRASE=
+POLYMARKET_CLOB_API=https://clob.polymarket.com
 DASHBOARD_PORT=3000
 LOG_LEVEL=info
 SCANNER_FETCH_TIMEOUT_MS=20000
@@ -531,7 +545,15 @@ SCANNER_GAMMA_PAGE_SIZE=100
 
 ```env
 ENABLE_LIVE_TRADING=true
-POLYMARKET_API_KEY=your_api_key_from_polymarket
+POLYMARKET_PRIVATE_KEY=0xyour_l1_private_key
+POLYMARKET_FUNDER_ADDRESS=0xyour_proxy_or_funder_address
+POLYMARKET_SIGNATURE_TYPE=2
+POLYMARKET_CHAIN_ID=137
+# Optional explicit L2 creds (if omitted, bot derives them)
+POLYMARKET_API_KEY=
+POLYMARKET_API_SECRET=
+POLYMARKET_API_PASSPHRASE=
+POLYMARKET_CLOB_API=https://clob.polymarket.com
 DASHBOARD_PORT=3000
 LOG_LEVEL=info
 SCANNER_FETCH_TIMEOUT_MS=20000
@@ -582,15 +604,23 @@ Live trading requires **two safety switches** to both be enabled — this preven
 
 ### Step-by-step to go live:
 
-**1. Get your Polymarket API key:**
+**1. Gather your Polymarket CLOB auth inputs:**
 - Log in to [polymarket.com](https://polymarket.com)
-- Go to Settings → API Keys
-- Create and copy your key
+- Export your trading private key (L1 signer) for your account
+- Copy your proxy/funder wallet address from profile/account settings
+- Optionally generate L2 API creds (apiKey/secret/passphrase); the bot can derive them automatically
 
 **2. Edit your `.env` file:**
 ```env
 ENABLE_LIVE_TRADING=true
-POLYMARKET_API_KEY=paste_your_key_here
+POLYMARKET_PRIVATE_KEY=0xyour_l1_private_key
+POLYMARKET_FUNDER_ADDRESS=0xyour_proxy_or_funder_address
+POLYMARKET_SIGNATURE_TYPE=2
+POLYMARKET_CHAIN_ID=137
+# Optional explicit L2 creds
+POLYMARKET_API_KEY=
+POLYMARKET_API_SECRET=
+POLYMARKET_API_PASSPHRASE=
 ```
 
 **3. Edit `config.yaml`:**
@@ -621,7 +651,7 @@ npm start
 | Protection | Description |
 |-----------|-------------|
 | Two-factor enable | Both `.env` AND `config.yaml` must enable live trading |
-| API key check | LIVE orders are refused if `POLYMARKET_API_KEY` is missing |
+| CLOB auth check | LIVE orders are refused if signer/funder auth inputs are invalid |
 | Daily loss limit | Trading pauses when daily losses hit your `max_daily_loss` |
 | Max drawdown | Trading stops if total loss exceeds your `max_drawdown` |
 | Per-trade cap | No trade exceeds `max_position_size` |
@@ -724,7 +754,10 @@ docker run -p 3000:3000 --env-file .env polymarket-bot
 # Run with live trading enabled (inline env vars)
 docker run -p 3000:3000 \
   -e ENABLE_LIVE_TRADING=true \
-  -e POLYMARKET_API_KEY=your_key_here \
+  -e POLYMARKET_PRIVATE_KEY=0xyour_l1_private_key \
+  -e POLYMARKET_FUNDER_ADDRESS=0xyour_proxy_or_funder_address \
+  -e POLYMARKET_SIGNATURE_TYPE=2 \
+  -e POLYMARKET_CHAIN_ID=137 \
   polymarket-bot
 
 # Use a custom config file

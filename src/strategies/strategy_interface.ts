@@ -70,6 +70,9 @@ export abstract class BaseStrategy implements StrategyInterface {
 
       // Use actual market price when available, fall back to 0.5 + edge
       const market = this.markets.get(signal.marketId);
+      const tokenId = market
+        ? (signal.outcome === 'YES' ? market.clobTokenIds[0] : (market.clobTokenIds[1] ?? market.clobTokenIds[0]))
+        : undefined;
       let price: number;
       if (market) {
         price = signal.outcome === 'YES'
@@ -82,6 +85,7 @@ export abstract class BaseStrategy implements StrategyInterface {
       return {
         walletId,
         marketId: signal.marketId,
+        tokenId,
         outcome: signal.outcome,
         side: signal.side,
         price: Number(Math.max(0.01, Math.min(0.99, price)).toFixed(4)),

@@ -1,6 +1,8 @@
 import { WalletConfig, WalletState, Position, TradeRecord, RiskLimits } from '../types';
 import { logger } from '../reporting/logs';
 import { consoleLog } from '../reporting/console_log';
+import { Wallet } from 'ethers';
+import { ClobClient, OrderType, Side } from '@polymarket/clob-client';
 
 type LivePreflightResult = {
   ok: boolean;
@@ -8,17 +10,26 @@ type LivePreflightResult = {
   details?: Record<string, unknown>;
 };
 
+type PolyApiCreds = {
+  apiKey: string;
+  secret: string;
+  passphrase: string;
+};
+
 export class PolymarketWallet {
   private static readonly MAX_TRADE_HISTORY = 10_000;
   private state: WalletState;
   private readonly trades: TradeRecord[] = [];
   private readonly clobApi: string;
+  private readonly chainId: number;
   private displayName: string = '';
   private liveDisabledReason: string | null = null;
+  private clobClient: ClobClient | null = null;
 
   constructor(config: WalletConfig, assignedStrategy: string) {
     this.displayName = config.id;
     this.clobApi = process.env.POLYMARKET_CLOB_API ?? 'https://clob.polymarket.com';
+    this.chainId = Number(process.env.POLYMARKET_CHAIN_ID ?? '137');
     this.state = {
       walletId: config.id,
       mode: 'LIVE',
@@ -67,11 +78,10 @@ export class PolymarketWallet {
   }
 
   async preflightLiveAccess(): Promise<LivePreflightResult> {
-    const apiKey = process.env.POLYMARKET_API_KEY;
-    if (!apiKey) {
-      const reason = 'POLYMARKET_API_KEY not set';
-      this.switchToPaperFallback(reason);
-      return { ok: false, reason };
+    const credValidation = this.validateLiveCredentialInputs();
+    if (!credValidation.ok) {
+      this.switchToPaperFallback(credValidation.reason);
+      return { ok: false, reason: credValidation.reason };
     }
 
     const clobReachability = await this.safeFetch(`${this.clobApi}/`, { method: 'GET' });
@@ -81,48 +91,27 @@ export class PolymarketWallet {
       return { ok: false, reason, details: { clobReachability } };
     }
 
-    const probePayload = {
-      market: '0x0',
-      side: 'BUY',
-      outcome: 'YES',
-      price: 0.5,
-      size: 0,
-      type: 'limit',
-    };
-
-    const probe = await this.safeFetch(`${this.clobApi}/order`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(probePayload),
-    });
-
-    if (!probe.ok && probe.status === 403 && this.isTradingRestrictedError(probe.body ?? '')) {
-      const reason = `LIVE preflight blocked by trading restriction (HTTP 403): ${probe.body ?? ''}`;
+    try {
+      await this.getClobClient();
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
       this.switchToPaperFallback(reason);
-      return {
-        ok: false,
-        reason,
-        details: {
-          status: probe.status,
-          headers: probe.headers,
-        },
-      };
+      return { ok: false, reason };
     }
 
-    logger.info({ walletId: this.state.walletId, probeStatus: probe.status ?? null }, 'LIVE preflight passed');
+    logger.info({ walletId: this.state.walletId, clobApi: this.clobApi, chainId: this.chainId }, 'LIVE preflight passed with official CLOB auth flow');
     return {
       ok: true,
       details: {
-        probeStatus: probe.status ?? null,
+        clobApi: this.clobApi,
+        chainId: this.chainId,
       },
     };
   }
 
   async placeOrder(request: {
     marketId: string;
+    tokenId?: string;
     outcome: 'YES' | 'NO';
     side: 'BUY' | 'SELL';
     price: number;
@@ -133,12 +122,22 @@ export class PolymarketWallet {
       return;
     }
 
-    const apiKey = process.env.POLYMARKET_API_KEY;
-    if (!apiKey) {
-      const msg = 'POLYMARKET_API_KEY not set — cannot place LIVE order. Set it in your .env file.';
+    const tokenId = request.tokenId ?? request.marketId;
+    if (!tokenId) {
+      const msg = 'Missing tokenId for LIVE order. Provide a CLOB token ID for order placement.';
       logger.error({ walletId: this.state.walletId }, msg);
       consoleLog.error('ORDER', `[${this.state.walletId}] ${msg}`);
       throw new Error(msg);
+    }
+
+    let client: ClobClient;
+    try {
+      client = await this.getClobClient();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error({ walletId: this.state.walletId, error: msg }, 'LIVE order setup error');
+      consoleLog.error('ORDER', `[${this.state.walletId}] LIVE order setup failed: ${msg}`);
+      throw new Error(`LIVE order setup error: ${msg}`);
     }
 
     const orderId = `live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -149,6 +148,7 @@ export class PolymarketWallet {
         walletId: this.state.walletId,
         orderId,
         marketId: request.marketId,
+        tokenId,
         outcome: request.outcome,
         side: request.side,
         price: request.price,
@@ -158,55 +158,37 @@ export class PolymarketWallet {
       `LIVE order submitting ${request.side} ${request.outcome} market=${request.marketId} price=${request.price} size=${request.size}`,
     );
 
-    /* ── Submit order to Polymarket CLOB API ── */
-    const orderPayload = {
-      market: request.marketId,
-      side: request.side,
-      outcome: request.outcome,
-      price: request.price,
-      size: request.size,
-      type: 'limit',
-    };
-
-    let apiResponse: Response;
+    /* ── Submit order via official Polymarket CLOB client ── */
+    let orderResponse: unknown;
     try {
-      apiResponse = await fetch(`${this.clobApi}/order`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
+      orderResponse = await client.createAndPostOrder(
+        {
+          tokenID: tokenId,
+          price: request.price,
+          size: request.size,
+          side: request.side === 'BUY' ? Side.BUY : Side.SELL,
         },
-        body: JSON.stringify(orderPayload),
-      });
+        {
+          tickSize: '0.01',
+          negRisk: false,
+        },
+        OrderType.GTC,
+      );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logger.error({ walletId: this.state.walletId, orderId, error: msg }, 'LIVE order network error');
-      consoleLog.error('ORDER', `[${this.state.walletId}] Order failed (network): ${msg}`);
-      throw new Error(`LIVE order network error: ${msg}`);
-    }
-
-    if (!apiResponse.ok) {
-      let errorBody = '';
-      try { errorBody = await apiResponse.text(); } catch { /* ignore */ }
-      const headerDiag = this.pickDiagnosticHeaders(apiResponse);
-      const msg = `LIVE order rejected by Polymarket (HTTP ${apiResponse.status}): ${errorBody}`;
+      const details = this.stringifyUnknown(err);
+      const msg = `LIVE order rejected by Polymarket: ${details}`;
       logger.error({
         walletId: this.state.walletId,
         orderId,
-        status: apiResponse.status,
-        statusText: apiResponse.statusText,
-        body: errorBody,
-        url: `${this.clobApi}/order`,
-        headers: headerDiag,
+        tokenId,
+        error: details,
       }, msg);
       consoleLog.error('ORDER', `[${this.state.walletId}] ${msg}`);
-
-      if (apiResponse.status === 403 && this.isTradingRestrictedError(errorBody)) {
-        this.switchToPaperFallback(`Trading restricted (HTTP 403): ${errorBody}`);
+      if (this.isTradingRestrictedError(details)) {
+        this.switchToPaperFallback(`Trading restricted: ${details}`);
         this.placePaperFallbackOrder(request, 'Falling back after LIVE trading restriction');
         return;
       }
-
       throw new Error(msg);
     }
 
@@ -251,6 +233,7 @@ export class PolymarketWallet {
       {
         walletId: this.state.walletId,
         orderId,
+        tokenId,
         marketId: request.marketId,
         side: request.side,
         outcome: request.outcome,
@@ -258,6 +241,7 @@ export class PolymarketWallet {
         size: request.size,
         realizedPnl,
         balance: this.state.availableBalance,
+        clobResponse: orderResponse,
       },
       `LIVE order FILLED ${request.side} ${request.outcome} market=${request.marketId} price=${request.price} size=${request.size}`,
     );
@@ -403,6 +387,107 @@ export class PolymarketWallet {
   private isTradingRestrictedError(body: string): boolean {
     const text = body.toLowerCase();
     return text.includes('trading restricted') || text.includes('geoblock') || text.includes('blocked in your region');
+  }
+
+  private validateLiveCredentialInputs(): { ok: true } | { ok: false; reason: string } {
+    const privateKey = process.env.POLYMARKET_PRIVATE_KEY;
+    if (!privateKey) {
+      return { ok: false, reason: 'POLYMARKET_PRIVATE_KEY not set' };
+    }
+
+    if (!privateKey.startsWith('0x') || privateKey.length !== 66) {
+      return { ok: false, reason: 'POLYMARKET_PRIVATE_KEY must be a 32-byte hex key prefixed with 0x' };
+    }
+
+    const funder = process.env.POLYMARKET_FUNDER_ADDRESS;
+    if (!funder) {
+      return { ok: false, reason: 'POLYMARKET_FUNDER_ADDRESS not set' };
+    }
+
+    if (!/^0x[a-fA-F0-9]{40}$/.test(funder)) {
+      return { ok: false, reason: 'POLYMARKET_FUNDER_ADDRESS must be a valid 0x-prefixed address' };
+    }
+
+    const sigTypeRaw = process.env.POLYMARKET_SIGNATURE_TYPE ?? '2';
+    if (!['0', '1', '2'].includes(sigTypeRaw)) {
+      return { ok: false, reason: 'POLYMARKET_SIGNATURE_TYPE must be 0 (EOA), 1 (POLY_PROXY), or 2 (GNOSIS_SAFE)' };
+    }
+
+    const hasAllL2Creds = Boolean(
+      process.env.POLYMARKET_API_KEY
+      && process.env.POLYMARKET_API_SECRET
+      && process.env.POLYMARKET_API_PASSPHRASE,
+    );
+    if (!hasAllL2Creds) {
+      logger.info(
+        { walletId: this.state.walletId },
+        'POLYMARKET_API_KEY / SECRET / PASSPHRASE not fully set; deriving credentials via official L1 flow',
+      );
+    }
+
+    return { ok: true };
+  }
+
+  private async getClobClient(): Promise<ClobClient> {
+    if (this.clobClient) return this.clobClient;
+
+    const validation = this.validateLiveCredentialInputs();
+    if (!validation.ok) {
+      throw new Error(validation.reason);
+    }
+
+    const privateKey = process.env.POLYMARKET_PRIVATE_KEY as string;
+    const funder = process.env.POLYMARKET_FUNDER_ADDRESS as string;
+    const signatureType = Number(process.env.POLYMARKET_SIGNATURE_TYPE ?? '2');
+    const signer = new Wallet(privateKey);
+
+    const providedCreds = this.readProvidedApiCreds();
+    const apiCreds = providedCreds ?? await this.deriveApiCreds(signer);
+
+    this.clobClient = new ClobClient(
+      this.clobApi,
+      this.chainId,
+      signer,
+      apiCreds,
+      signatureType,
+      funder,
+    );
+    return this.clobClient;
+  }
+
+  private readProvidedApiCreds(): PolyApiCreds | null {
+    const apiKey = process.env.POLYMARKET_API_KEY;
+    const secret = process.env.POLYMARKET_API_SECRET;
+    const passphrase = process.env.POLYMARKET_API_PASSPHRASE;
+    if (!apiKey || !secret || !passphrase) return null;
+    return { apiKey, secret, passphrase };
+  }
+
+  private async deriveApiCreds(signer: Wallet): Promise<PolyApiCreds> {
+    const tempClient = new ClobClient(this.clobApi, this.chainId, signer);
+    const derived = await tempClient.createOrDeriveApiKey();
+    const creds = derived as Partial<PolyApiCreds>;
+
+    if (!creds.apiKey || !creds.secret || !creds.passphrase) {
+      throw new Error('Failed to derive valid Polymarket L2 API credentials (apiKey/secret/passphrase)');
+    }
+
+    logger.info({ walletId: this.state.walletId }, 'Derived Polymarket L2 API credentials via official CLOB flow');
+    return {
+      apiKey: creds.apiKey,
+      secret: creds.secret,
+      passphrase: creds.passphrase,
+    };
+  }
+
+  private stringifyUnknown(value: unknown): string {
+    if (typeof value === 'string') return value;
+    if (value instanceof Error) return value.message;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
   }
 
   private pickDiagnosticHeaders(response: Response): Record<string, string> {

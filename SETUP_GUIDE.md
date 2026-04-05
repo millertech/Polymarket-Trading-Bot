@@ -138,8 +138,22 @@ Open `.env` in any text editor (Notepad, VS Code, TextEdit, etc.) and you'll see
 # Set to "true" to allow LIVE wallets to execute real trades.
 ENABLE_LIVE_TRADING=false
 
-# Your Polymarket API key for placing real orders.
+# L1 signer private key used to sign/derive CLOB auth.
+POLYMARKET_PRIVATE_KEY=
+
+# Proxy/funder wallet address that holds funds.
+POLYMARKET_FUNDER_ADDRESS=
+
+# 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE (most common)
+POLYMARKET_SIGNATURE_TYPE=2
+
+# Polygon chain id
+POLYMARKET_CHAIN_ID=137
+
+# Optional explicit L2 API creds. Leave blank to auto-derive.
 POLYMARKET_API_KEY=
+POLYMARKET_API_SECRET=
+POLYMARKET_API_PASSPHRASE=
 
 # Dashboard port (default: 3000)
 DASHBOARD_PORT=3000
@@ -193,19 +207,27 @@ You'll see:
 
 Live trading requires **THREE things** to be enabled (this is a safety measure):
 
-### 1. Get your Polymarket API Key
+### 1. Gather your Polymarket CLOB auth details
 
 1. Go to [https://polymarket.com](https://polymarket.com) and log in
-2. Go to **Settings** → **API Keys**
-3. Create a new API key and copy it
+2. Export your trading private key (L1 signer)
+3. Copy your proxy/funder wallet address from your account profile
+4. Optional: generate L2 API creds (apiKey, secret, passphrase)
 
 ### 2. Update your `.env` file
 
-Open your `.env` file and change these two lines:
+Open your `.env` file and set the live trading auth block:
 
 ```env
 ENABLE_LIVE_TRADING=true
-POLYMARKET_API_KEY=paste_your_api_key_here
+POLYMARKET_PRIVATE_KEY=0xyour_l1_private_key
+POLYMARKET_FUNDER_ADDRESS=0xyour_proxy_or_funder_address
+POLYMARKET_SIGNATURE_TYPE=2
+POLYMARKET_CHAIN_ID=137
+# Optional explicit L2 creds (leave blank to auto-derive)
+POLYMARKET_API_KEY=
+POLYMARKET_API_SECRET=
+POLYMARKET_API_PASSPHRASE=
 ```
 
 ### 3. Update `config.yaml`
@@ -322,7 +344,10 @@ docker run -p 3000:3000 polymarket-bot
 # Run in LIVE mode
 docker run -p 3000:3000 \
   -e ENABLE_LIVE_TRADING=true \
-  -e POLYMARKET_API_KEY=your_api_key_here \
+  -e POLYMARKET_PRIVATE_KEY=0xyour_l1_private_key \
+  -e POLYMARKET_FUNDER_ADDRESS=0xyour_proxy_or_funder_address \
+  -e POLYMARKET_SIGNATURE_TYPE=2 \
+  -e POLYMARKET_CHAIN_ID=137 \
   polymarket-bot
 ```
 
@@ -369,11 +394,14 @@ Node.js is not installed. Go back to [Step 1](#step-1-install-the-prerequisites)
 
 npm comes with Node.js. Reinstall Node.js from [Step 1](#step-1-install-the-prerequisites).
 
-### "POLYMARKET_API_KEY not set; refusing LIVE order"
+### "POLYMARKET_PRIVATE_KEY not set" or "POLYMARKET_FUNDER_ADDRESS not set"
 
-Your `.env` file is missing the API key. Open `.env` and add your key:
+Your `.env` file is missing required CLOB signer details. Open `.env` and add:
 ```env
-POLYMARKET_API_KEY=your_key_here
+POLYMARKET_PRIVATE_KEY=0xyour_l1_private_key
+POLYMARKET_FUNDER_ADDRESS=0xyour_proxy_or_funder_address
+POLYMARKET_SIGNATURE_TYPE=2
+POLYMARKET_CHAIN_ID=137
 ```
 
 ### "LIVE trading requested but ENABLE_LIVE_TRADING is false"

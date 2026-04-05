@@ -42,6 +42,8 @@ export type OrderOutcome = 'YES' | 'NO';
 export interface OrderRequest {
   walletId: string;
   marketId: string;
+  /** CLOB token ID for order placement (falls back to marketId when omitted). */
+  tokenId?: string;
   outcome: OrderOutcome;
   side: OrderSide;
   price: number;

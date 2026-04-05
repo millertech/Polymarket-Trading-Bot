@@ -8,6 +8,7 @@ export interface ExecutionWallet {
   getTradeHistory(): TradeRecord[];
   placeOrder(request: {
     marketId: string;
+    tokenId?: string;
     outcome: 'YES' | 'NO';
     side: 'BUY' | 'SELL';
     price: number;
