@@ -110,7 +110,18 @@ export class PolymarketWallet {
       return { ok: false, reason };
     }
 
-    logger.info({ walletId: this.state.walletId, clobApi: this.clobApi, chainId: this.chainId }, 'LIVE preflight passed with official CLOB auth flow');
+    const signerAddress = new Wallet(process.env.POLYMARKET_PRIVATE_KEY as string).address;
+    logger.info(
+      {
+        walletId: this.state.walletId,
+        clobApi: this.clobApi,
+        chainId: this.chainId,
+        signatureType: Number(process.env.POLYMARKET_SIGNATURE_TYPE ?? '2'),
+        signerAddress,
+        funderAddress: process.env.POLYMARKET_FUNDER_ADDRESS,
+      },
+      'LIVE preflight passed with official CLOB auth flow',
+    );
     return {
       ok: true,
       details: {
@@ -441,6 +452,22 @@ export class PolymarketWallet {
     const sigTypeRaw = process.env.POLYMARKET_SIGNATURE_TYPE ?? '2';
     if (!['0', '1', '2'].includes(sigTypeRaw)) {
       return { ok: false, reason: 'POLYMARKET_SIGNATURE_TYPE must be 0 (EOA), 1 (POLY_PROXY), or 2 (GNOSIS_SAFE)' };
+    }
+
+    const signerAddress = new Wallet(privateKey).address;
+    const sameAsSigner = signerAddress.toLowerCase() === funder.toLowerCase();
+    if (sigTypeRaw === '0' && !sameAsSigner) {
+      logger.warn(
+        { walletId: this.state.walletId, signerAddress, funderAddress: funder, signatureType: 0 },
+        'Signature type 0 (EOA) usually requires POLYMARKET_FUNDER_ADDRESS to equal signer address',
+      );
+    }
+
+    if (sigTypeRaw === '1' && sameAsSigner) {
+      logger.warn(
+        { walletId: this.state.walletId, signerAddress, funderAddress: funder, signatureType: 1 },
+        'Signature type 1 (POLY_PROXY) usually requires POLYMARKET_FUNDER_ADDRESS to be your proxy wallet, not the signer address',
+      );
     }
 
     const hasAllL2Creds = Boolean(
