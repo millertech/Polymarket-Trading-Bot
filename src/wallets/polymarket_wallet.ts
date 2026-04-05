@@ -30,12 +30,17 @@ export class PolymarketWallet {
   private clobClient: ClobClient | null = null;
   private readonly marketTokenCache = new Map<string, string[]>();
 
+  private static isTruthyEnv(value?: string): boolean {
+    if (!value) return false;
+    return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+  }
+
   constructor(config: WalletConfig, assignedStrategy: string) {
     this.displayName = config.id;
     this.clobApi = process.env.POLYMARKET_CLOB_API ?? 'https://clob.polymarket.com';
     this.gammaApi = process.env.POLYMARKET_GAMMA_API ?? 'https://gamma-api.polymarket.com';
     this.chainId = Number(process.env.POLYMARKET_CHAIN_ID ?? '137');
-    this.logDerivedL2Creds = (process.env.POLYMARKET_LOG_DERIVED_L2 ?? 'false').toLowerCase() === 'true';
+    this.logDerivedL2Creds = PolymarketWallet.isTruthyEnv(process.env.POLYMARKET_LOG_DERIVED_L2);
     this.state = {
       walletId: config.id,
       mode: 'LIVE',
@@ -524,6 +529,17 @@ export class PolymarketWallet {
         signatureType,
       },
       'POLYMARKET_LOG_DERIVED_L2=true: printing full L2 credentials in logs. Treat logs as sensitive secrets.',
+    );
+
+    logger.warn(
+      {
+        walletId: this.state.walletId,
+        source,
+        POLYMARKET_API_KEY: creds.key,
+        POLYMARKET_API_SECRET: creds.secret,
+        POLYMARKET_API_PASSPHRASE: creds.passphrase,
+      },
+      '[SENSITIVE] L2 creds for .env (disable POLYMARKET_LOG_DERIVED_L2 after copying)',
     );
 
     consoleLog.warn(
