@@ -225,6 +225,7 @@ export class PolymarketWallet {
       {
         walletId: this.state.walletId,
         orderId,
+        credSource: this.activeCredSource,
         marketId: request.marketId,
         tokenId,
         outcome: request.outcome,
@@ -254,6 +255,7 @@ export class PolymarketWallet {
           {
             walletId: this.state.walletId,
             orderId,
+            credSource: this.activeCredSource,
             marketId: request.marketId,
             tokenId,
           },
@@ -300,6 +302,7 @@ export class PolymarketWallet {
         logger.error({
           walletId: this.state.walletId,
           orderId,
+          credSource: this.activeCredSource,
           tokenId,
           error: details,
         }, msg);
@@ -354,6 +357,7 @@ export class PolymarketWallet {
       {
         walletId: this.state.walletId,
         orderId,
+        credSource: this.activeCredSource,
         tokenId,
         marketId: request.marketId,
         side: request.side,
