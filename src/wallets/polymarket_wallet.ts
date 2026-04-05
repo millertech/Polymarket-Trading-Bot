@@ -18,11 +18,13 @@ type PolyApiCreds = {
 
 export class PolymarketWallet {
   private static readonly MAX_TRADE_HISTORY = 10_000;
+  private static hasLoggedL2Credentials = false;
   private state: WalletState;
   private readonly trades: TradeRecord[] = [];
   private readonly clobApi: string;
   private readonly gammaApi: string;
   private readonly chainId: number;
+  private readonly logDerivedL2Creds: boolean;
   private displayName: string = '';
   private liveDisabledReason: string | null = null;
   private clobClient: ClobClient | null = null;
@@ -33,6 +35,7 @@ export class PolymarketWallet {
     this.clobApi = process.env.POLYMARKET_CLOB_API ?? 'https://clob.polymarket.com';
     this.gammaApi = process.env.POLYMARKET_GAMMA_API ?? 'https://gamma-api.polymarket.com';
     this.chainId = Number(process.env.POLYMARKET_CHAIN_ID ?? '137');
+    this.logDerivedL2Creds = (process.env.POLYMARKET_LOG_DERIVED_L2 ?? 'false').toLowerCase() === 'true';
     this.state = {
       walletId: config.id,
       mode: 'LIVE',
@@ -465,6 +468,7 @@ export class PolymarketWallet {
 
     const providedCreds = this.readProvidedApiCreds();
     const apiCreds = providedCreds ?? await this.deriveApiCreds(signer);
+    this.maybeLogL2Credentials(apiCreds, providedCreds ? 'provided' : 'derived');
 
     this.clobClient = new ClobClient(
       this.clobApi,
@@ -501,6 +505,41 @@ export class PolymarketWallet {
       secret: creds.secret,
       passphrase: creds.passphrase,
     };
+  }
+
+  private maybeLogL2Credentials(creds: PolyApiCreds, source: 'derived' | 'provided'): void {
+    if (!this.logDerivedL2Creds || PolymarketWallet.hasLoggedL2Credentials) return;
+
+    PolymarketWallet.hasLoggedL2Credentials = true;
+
+    const walletAddress = process.env.POLYMARKET_FUNDER_ADDRESS ?? '(missing)';
+    const signatureType = process.env.POLYMARKET_SIGNATURE_TYPE ?? '2';
+
+    logger.warn(
+      {
+        walletId: this.state.walletId,
+        source,
+        signerAddress: new Wallet(process.env.POLYMARKET_PRIVATE_KEY as string).address,
+        funderAddress: walletAddress,
+        signatureType,
+      },
+      'POLYMARKET_LOG_DERIVED_L2=true: printing full L2 credentials in logs. Treat logs as sensitive secrets.',
+    );
+
+    consoleLog.warn(
+      'AUTH',
+      '[SENSITIVE] L2 creds for .env (keep private):\n'
+      + `POLYMARKET_API_KEY=${creds.key}\n`
+      + `POLYMARKET_API_SECRET=${creds.secret}\n`
+      + `POLYMARKET_API_PASSPHRASE=${creds.passphrase}`,
+      {
+        walletId: this.state.walletId,
+        source,
+        signerAddress: new Wallet(process.env.POLYMARKET_PRIVATE_KEY as string).address,
+        funderAddress: walletAddress,
+        signatureType: Number(signatureType),
+      },
+    );
   }
 
   private stringifyUnknown(value: unknown): string {

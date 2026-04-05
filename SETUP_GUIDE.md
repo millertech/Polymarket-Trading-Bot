@@ -155,6 +155,9 @@ POLYMARKET_API_KEY=
 POLYMARKET_API_SECRET=
 POLYMARKET_API_PASSPHRASE=
 
+# Optional: print derived L2 creds once in logs (SENSITIVE)
+POLYMARKET_LOG_DERIVED_L2=false
+
 # Dashboard port (default: 3000)
 DASHBOARD_PORT=3000
 
@@ -244,6 +247,7 @@ Exactly what to copy from your Polymarket account and where to put it:
 Important:
 - If L2 values are empty, the bot derives them automatically from your private key.
 - Use `POLYMARKET_SIGNATURE_TYPE=2` for most users.
+- If you want the bot to print the exact derived values, temporarily set `POLYMARKET_LOG_DERIVED_L2=true`, run once, copy values, then set it back to `false`.
 
 ### 3. Update `config.yaml`
 
@@ -435,6 +439,7 @@ Check these first:
 Common fix:
 - Clear `POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, and `POLYMARKET_API_PASSPHRASE` to let the bot re-derive L2 creds from L1.
 - Verify `POLYMARKET_SIGNATURE_TYPE` and `POLYMARKET_FUNDER_ADDRESS`, then restart.
+- To print the derived L2 values for copy/paste, set `POLYMARKET_LOG_DERIVED_L2=true` for one run, then disable it immediately.
 
 ### "LIVE trading requested but ENABLE_LIVE_TRADING is false"
 
