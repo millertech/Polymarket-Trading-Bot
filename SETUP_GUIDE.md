@@ -419,6 +419,23 @@ POLYMARKET_SIGNATURE_TYPE=2
 POLYMARKET_CHAIN_ID=137
 ```
 
+### "invalid signature" from CLOB when placing orders
+
+This means auth credentials and signer/funder settings do not match each other.
+
+Check these first:
+1. `POLYMARKET_PRIVATE_KEY` must match the signer wallet shown in logs as `POLY_ADDRESS`.
+2. `POLYMARKET_FUNDER_ADDRESS` must be your Polymarket profile/proxy wallet that holds funds.
+3. `POLYMARKET_SIGNATURE_TYPE` must match account type:
+  - `0` = EOA wallet
+  - `1` = POLY_PROXY (Magic/email style login)
+  - `2` = GNOSIS_SAFE/proxy wallet flow
+4. If you manually set `POLYMARKET_API_KEY/SECRET/PASSPHRASE`, regenerate them for the same signer and funder.
+
+Common fix:
+- Clear `POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, and `POLYMARKET_API_PASSPHRASE` to let the bot re-derive L2 creds from L1.
+- Verify `POLYMARKET_SIGNATURE_TYPE` and `POLYMARKET_FUNDER_ADDRESS`, then restart.
+
 ### "LIVE trading requested but ENABLE_LIVE_TRADING is false"
 
 You need to enable live trading in **both** places:

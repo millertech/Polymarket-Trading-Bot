@@ -166,19 +166,12 @@ export class PolymarketWallet {
     /* ── Submit order via official Polymarket CLOB client ── */
     let orderResponse: unknown;
     try {
-      orderResponse = await client.createAndPostOrder(
-        {
-          tokenID: tokenId,
-          price: request.price,
-          size: request.size,
-          side: request.side === 'BUY' ? Side.BUY : Side.SELL,
-        },
-        {
-          tickSize: '0.01',
-          negRisk: false,
-        },
-        OrderType.GTC,
-      );
+      orderResponse = await this.submitClobOrder(client, {
+        tokenID: tokenId,
+        price: request.price,
+        size: request.size,
+        side: request.side === 'BUY' ? Side.BUY : Side.SELL,
+      });
     } catch (err) {
       const details = this.stringifyUnknown(err);
 
@@ -188,19 +181,12 @@ export class PolymarketWallet {
         if (refreshed && refreshed !== tokenId) {
           logger.warn({ walletId: this.state.walletId, orderId, oldTokenId: tokenId, newTokenId: refreshed }, 'Retrying LIVE order with refreshed CLOB token ID');
           try {
-            orderResponse = await client.createAndPostOrder(
-              {
-                tokenID: refreshed,
-                price: request.price,
-                size: request.size,
-                side: request.side === 'BUY' ? Side.BUY : Side.SELL,
-              },
-              {
-                tickSize: '0.01',
-                negRisk: false,
-              },
-              OrderType.GTC,
-            );
+            orderResponse = await this.submitClobOrder(client, {
+              tokenID: refreshed,
+              price: request.price,
+              size: request.size,
+              side: request.side === 'BUY' ? Side.BUY : Side.SELL,
+            });
             tokenId = refreshed;
           } catch {
             // keep original error handling below
@@ -607,6 +593,39 @@ export class PolymarketWallet {
     }
 
     return [];
+  }
+
+  private async submitClobOrder(
+    client: ClobClient,
+    orderArgs: { tokenID: string; price: number; size: number; side: Side },
+  ): Promise<unknown> {
+    const response = await client.createAndPostOrder(
+      orderArgs,
+      {
+        tickSize: '0.01',
+        negRisk: false,
+      },
+      OrderType.GTC,
+    );
+
+    // Some clob-client versions return `{ error, status }` instead of throwing.
+    if (!this.isClobOrderAccepted(response)) {
+      const detail = this.stringifyUnknown(response);
+      throw new Error(`CLOB rejected order: ${detail}`);
+    }
+
+    return response;
+  }
+
+  private isClobOrderAccepted(response: unknown): boolean {
+    if (!response || typeof response !== 'object') return false;
+    const r = response as Record<string, unknown>;
+
+    if (typeof r.status === 'number' && r.status >= 400) return false;
+    if (typeof r.error === 'string' && r.error.trim().length > 0) return false;
+    if (r.success === false) return false;
+
+    return true;
   }
 
   private pickDiagnosticHeaders(response: Response): Record<string, string> {
