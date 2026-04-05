@@ -405,6 +405,32 @@ docker stop polymarket-bot
 
 ## Troubleshooting
 
+### Python one-shot live auth/order test (recommended for debugging)
+
+If you want a minimal reproducible test path (outside the bot engine), use:
+
+1. Install Python deps:
+```bash
+pip install -r scripts/requirements-live-test.txt
+```
+2. Run auth-only validation (no order submitted):
+```bash
+python3 scripts/polymarket_live_order_test.py
+```
+3. Submit one real order (small size):
+```bash
+python3 scripts/polymarket_live_order_test.py \
+  --place-order \
+  --token-id YOUR_TOKEN_ID \
+  --side BUY \
+  --price 0.10 \
+  --size 1
+```
+
+Useful for signature type 1 testing:
+- Override per run: `--signature-type 1 --funder 0xYourProxyWallet`
+- If you do not set `POLYMARKET_API_KEY/SECRET/PASSPHRASE`, the script derives them via L1 and prints values for `.env`.
+
 ### "command not found: node"
 
 Node.js is not installed. Go back to [Step 1](#step-1-install-the-prerequisites).

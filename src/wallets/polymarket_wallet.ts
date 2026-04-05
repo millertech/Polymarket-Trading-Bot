@@ -18,6 +18,7 @@ type PolyApiCreds = {
 
 export class PolymarketWallet {
   private static readonly MAX_TRADE_HISTORY = 10_000;
+  private static readonly MIN_MARKETABLE_BUY_NOTIONAL_USD = 1;
   private static hasLoggedL2Credentials = false;
   private state: WalletState;
   private readonly trades: TradeRecord[] = [];
@@ -164,8 +165,34 @@ export class PolymarketWallet {
       throw new Error(`LIVE order setup error: ${msg}`);
     }
 
+    let normalizedPrice = request.price;
+    let normalizedSize = request.size;
+
+    if (request.side === 'BUY') {
+      const notional = normalizedPrice * normalizedSize;
+      if (notional < PolymarketWallet.MIN_MARKETABLE_BUY_NOTIONAL_USD) {
+        const adjustedSize = Math.ceil(
+          PolymarketWallet.MIN_MARKETABLE_BUY_NOTIONAL_USD / Math.max(normalizedPrice, 0.0001),
+        );
+        logger.warn(
+          {
+            walletId: this.state.walletId,
+            marketId: request.marketId,
+            tokenId,
+            originalPrice: normalizedPrice,
+            originalSize: normalizedSize,
+            originalNotional: Number(notional.toFixed(6)),
+            adjustedSize,
+            adjustedNotional: Number((normalizedPrice * adjustedSize).toFixed(6)),
+          },
+          'Adjusted LIVE BUY order to meet minimum $1 marketable notional',
+        );
+        normalizedSize = adjustedSize;
+      }
+    }
+
     const orderId = `live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const cost = request.price * request.size;
+    const cost = normalizedPrice * normalizedSize;
 
     logger.info(
       {
@@ -175,11 +202,11 @@ export class PolymarketWallet {
         tokenId,
         outcome: request.outcome,
         side: request.side,
-        price: request.price,
-        size: request.size,
+        price: normalizedPrice,
+        size: normalizedSize,
         cost,
       },
-      `LIVE order submitting ${request.side} ${request.outcome} market=${request.marketId} price=${request.price} size=${request.size}`,
+      `LIVE order submitting ${request.side} ${request.outcome} market=${request.marketId} price=${normalizedPrice} size=${normalizedSize}`,
     );
 
     /* ── Submit order via official Polymarket CLOB client ── */
@@ -187,8 +214,8 @@ export class PolymarketWallet {
     try {
       orderResponse = await this.submitClobOrder(client, {
         tokenID: tokenId,
-        price: request.price,
-        size: request.size,
+        price: normalizedPrice,
+        size: normalizedSize,
         side: request.side === 'BUY' ? Side.BUY : Side.SELL,
       });
     } catch (err) {
@@ -202,8 +229,8 @@ export class PolymarketWallet {
           try {
             orderResponse = await this.submitClobOrder(client, {
               tokenID: refreshed,
-              price: request.price,
-              size: request.size,
+              price: normalizedPrice,
+              size: normalizedSize,
               side: request.side === 'BUY' ? Side.BUY : Side.SELL,
             });
             tokenId = refreshed;
@@ -239,12 +266,12 @@ export class PolymarketWallet {
       marketId: request.marketId,
       outcome: request.outcome,
       side: request.side,
-      price: request.price,
-      size: request.size,
+      price: normalizedPrice,
+      size: normalizedSize,
     });
 
     const realizedPnl = request.side === 'SELL' && entryPrice > 0
-      ? (request.price - entryPrice) * request.size
+      ? (normalizedPrice - entryPrice) * normalizedSize
       : 0;
     this.state.realizedPnl += realizedPnl;
 
@@ -257,8 +284,8 @@ export class PolymarketWallet {
       marketId: request.marketId,
       outcome: request.outcome,
       side: request.side,
-      price: request.price,
-      size: request.size,
+      price: normalizedPrice,
+      size: normalizedSize,
       cost,
       realizedPnl,
       cumulativePnl: this.state.realizedPnl,
@@ -278,24 +305,24 @@ export class PolymarketWallet {
         marketId: request.marketId,
         side: request.side,
         outcome: request.outcome,
-        price: request.price,
-        size: request.size,
+        price: normalizedPrice,
+        size: normalizedSize,
         realizedPnl,
         balance: this.state.availableBalance,
         clobResponse: orderResponse,
       },
-      `LIVE order FILLED ${request.side} ${request.outcome} market=${request.marketId} price=${request.price} size=${request.size}`,
+      `LIVE order FILLED ${request.side} ${request.outcome} market=${request.marketId} price=${normalizedPrice} size=${normalizedSize}`,
     );
 
-    consoleLog.success('ORDER', `[${this.state.walletId}] ${request.side} ${request.outcome} ×${request.size} @ $${request.price} → PnL $${realizedPnl.toFixed(2)} | Bal $${this.state.availableBalance.toFixed(2)}`, {
+    consoleLog.success('ORDER', `[${this.state.walletId}] ${request.side} ${request.outcome} ×${normalizedSize} @ $${normalizedPrice} → PnL $${realizedPnl.toFixed(2)} | Bal $${this.state.availableBalance.toFixed(2)}`, {
       walletId: this.state.walletId,
       strategy: this.state.assignedStrategy,
       orderId,
       marketId: request.marketId,
       outcome: request.outcome,
       side: request.side,
-      price: request.price,
-      size: request.size,
+      price: normalizedPrice,
+      size: normalizedSize,
       realizedPnl: Number(realizedPnl.toFixed(4)),
       cumulativePnl: Number(this.state.realizedPnl.toFixed(4)),
       balanceAfter: Number(this.state.availableBalance.toFixed(2)),
