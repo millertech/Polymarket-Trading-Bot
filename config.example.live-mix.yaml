@@ -195,12 +195,12 @@ strategy_config:
   copy_trade:
     # Whale addresses to follow (add Polymarket proxy wallet addresses)
     whale_addresses:
-      - 0x37c1874a60d348903594a96703e0507c518fc53a
-      - 0x78048aa26ac1967566b8ed11910b529e5f2d7025
-      - 0xc21ea96be762bb55041529af6e386e7c53b80215
-      - 0x682db86f41a12d9292befded523564314c1f31ab
-      - 0x12d6cccfc7470a3f4bafc53599a4779cbf2cf2a8
-      - 0xd3bae4c0e18556f88d1f683275d59821b097e793
+      - "0x37c1874a60d348903594a96703e0507c518fc53a"
+      - "0x78048aa26ac1967566b8ed11910b529e5f2d7025"
+      - "0xc21ea96be762bb55041529af6e386e7c53b80215"
+      - "0x682db86f41a12d9292befded523564314c1f31ab"
+      - "0x12d6cccfc7470a3f4bafc53599a4779cbf2cf2a8"
+      - "0xd3bae4c0e18556f88d1f683275d59821b097e793"
     # 'mirror' = same direction as whale, 'inverse' = contrarian
     copy_mode: mirror
     data_api_url: https://data-api.polymarket.com

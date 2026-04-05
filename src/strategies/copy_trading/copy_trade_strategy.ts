@@ -240,6 +240,32 @@ export class CopyTradeStrategy extends BaseStrategy {
     consoleLog.info('STRATEGY', `[copy_trade] Following ${this.cfg.whale_addresses.length} whale(s) in ${this.cfg.copy_mode} mode`);
   }
 
+  private normaliseWhaleAddresses(raw: unknown): string[] {
+    if (!Array.isArray(raw)) return [];
+
+    const out: string[] = [];
+    const seen = new Set<string>();
+
+    for (const item of raw) {
+      if (typeof item !== 'string') {
+        // YAML may parse unquoted 0x... as non-string; skip to avoid crashes.
+        continue;
+      }
+
+      const addr = item.trim().toLowerCase();
+      if (!/^0x[a-f0-9]{40}$/.test(addr)) {
+        continue;
+      }
+
+      if (!seen.has(addr)) {
+        seen.add(addr);
+        out.push(addr);
+      }
+    }
+
+    return out;
+  }
+
   /* ━━━━━━━━━━━━━━ Timer — Poll for whale trades ━━━━━━━━━━━━━━ */
 
   override async onTimer(): Promise<void> {
@@ -764,8 +790,9 @@ export class CopyTradeStrategy extends BaseStrategy {
 
   private buildConfig(raw: Record<string, unknown>): CopyTradeConfig {
     const d = DEFAULT_COPY_TRADE_CONFIG;
+    const whaleAddresses = this.normaliseWhaleAddresses(raw.whale_addresses);
     return {
-      whale_addresses: (raw.whale_addresses as string[]) ?? d.whale_addresses,
+      whale_addresses: whaleAddresses.length > 0 ? whaleAddresses : d.whale_addresses,
       copy_mode: (raw.copy_mode as 'mirror' | 'inverse') ?? d.copy_mode,
       data_api_url: (raw.data_api_url as string) ?? d.data_api_url,
       poll_interval_seconds: (raw.poll_interval_seconds as number) ?? d.poll_interval_seconds,
