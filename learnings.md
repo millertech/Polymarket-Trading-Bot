@@ -43,6 +43,7 @@
 - Lightweight periodic memory sampling in runtime counters (`process.memoryUsage` + `v8.getHeapStatistics`) gives early warning for sustained heap growth without requiring separate profiling sessions.
 - Dedupe/suppression maps that key by dynamic values must include TTL cleanup and max-size caps, otherwise memory grows slowly but unbounded over long live sessions.
 - Trade history retention should be enforced during rehydration, not only during append, to prevent snapshot restore from reintroducing oversized in-memory arrays.
+- Heavy dashboard endpoints should bound both serialization output and intermediate aggregation structures; limiting only the final response is not enough to prevent peak heap spikes.
 
 ## Design Choices
 - Added `runtime_wallet_snapshot` table for one-row latest snapshot storage.

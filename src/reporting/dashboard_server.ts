@@ -256,7 +256,7 @@ export class DashboardServer {
       return;
     }
 
-    if (handleDashboardTradeRoutes(res, path, method, {
+    if (handleDashboardTradeRoutes(req, res, url, path, method, {
       walletManager: this.walletManager,
       walletDisplayNames: this.walletDisplayNames,
       json,

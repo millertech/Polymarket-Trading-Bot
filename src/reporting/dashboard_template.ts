@@ -3290,9 +3290,11 @@ document.querySelectorAll('.con-sub-tab').forEach(btn=>{
     }
   }
 
+  const TRADE_LOG_FETCH_LIMIT = 3000;
+
   async function fetchTrades(){
     try{
-      const r=await fetch('/api/trades/all');
+      const r=await fetch('/api/trades/all?limit='+TRADE_LOG_FETCH_LIMIT+'&offset=0');
       if(!r.ok) return;
       const d=await r.json();
       allTrades=d.trades||[];

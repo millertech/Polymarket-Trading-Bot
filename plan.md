@@ -86,6 +86,7 @@ Overall progress estimate: 95%
   - Added runtime memory telemetry in `/api/system/counters` (heap used/limit %, RSS/external, in-process peaks, threshold levels, GC pause stats).
   - Added bounded-retention cleanup for long-lived dedupe maps in order routing and whale ingestion to prevent unbounded key growth.
   - Made wallet trade history cap configurable via `WALLET_MAX_TRADE_HISTORY` and enforced cap during runtime rehydration.
+  - Added bounded trade endpoint paging (`limit`/`offset`) and switched dashboard trade-log polling to capped fetches to reduce `/api/trades/all` memory spikes.
   - Added duplicate risk-rejection log throttling per wallet+reason in order routing.
   - Added ingestion auth circuit breaker for repeated 401/403 responses with configurable cooldown.
   - Added runtime persistence tests for snapshot and kill-switch state load/save/clear paths.
@@ -156,6 +157,7 @@ Changed files relevant to this plan:
   - Runtime counters now include memory pressure telemetry with threshold crossings and GC duration stats for OOM early warning.
   - Risk dedupe and ingestion error-dedupe state maps now prune stale keys and enforce max key caps.
   - Wallet runtime rehydration now trims restored trades to configured in-memory retention cap.
+  - `/api/trades/all` now avoids unbounded response construction by maintaining a bounded recent-trade window during aggregation.
 
 ### Remaining issues observed in logs
 - High-volume repetitive risk warnings when strategies keep proposing orders after limits are reached:
