@@ -1,12 +1,9 @@
 import http from 'http';
 import { WalletManager } from '../wallets/wallet_manager';
-import { MarketFetcher } from '../data/market_fetcher';
 import { buildDashboardPayload } from './dashboard_api';
 import { logger } from './logs';
-import { consoleLog } from './console_log';
-import { getRuntimeCountersSnapshot, recordDashboardApiRateLimited, recordDashboardApiRequest } from './runtime_counters';
+import { recordDashboardApiRateLimited, recordDashboardApiRequest } from './runtime_counters';
 import {
-  buildDashboardHtmlHeaders,
   FixedWindowIpRateLimiter,
   readJsonBody,
   resolveDashboardListenHost,
@@ -16,9 +13,11 @@ import type { WhaleAPI } from '../whales/whale_api';
 import type { Engine } from '../core/engine';
 import { CopyTradeStrategy } from '../strategies/copy_trading/copy_trade_strategy';
 import type { KillSwitch } from '../risk/kill_switch';
-import { getDashboardHtml } from './dashboard_template';
+import { handleDashboardCoreRoutes } from './dashboard_core_routes';
 import { handleDashboardWalletRoutes } from './dashboard_wallet_routes';
 import { handleDashboardStrategyRoutes } from './dashboard_strategy_routes';
+import { handleDashboardTradeRoutes } from './dashboard_trade_routes';
+import { handleDashboardOperationalRoutes } from './dashboard_operational_routes';
 
 /* ──────────────────────────────────────────────────────────────
    Helpers
@@ -218,51 +217,17 @@ export class DashboardServer {
       return;
     }
 
-    /* ─── HTML pages ─── */
-    if (path === '/' || path === '/dashboard') {
-      res.writeHead(200, buildDashboardHtmlHeaders());
-      res.end(getDashboardHtml());
-      return;
-    }
-
-    /* ─── JSON: overview data (used by Dashboard tab) ─── */
-    if (path === '/api/data' && method === 'GET') {
-      json(res, 200, buildDashboardPayload(
-        this.walletManager.listWallets(),
-        this.walletManager.getAllTradeHistories(),
-        this.getLiveMarketPrices(),
-        this.engine?.getPausedWallets(),
-        this.walletDisplayNames,
-      ));
-      return;
-    }
-
-    if (path === '/api/system/counters' && method === 'GET') {
-      json(res, 200, getRuntimeCountersSnapshot());
-      return;
-    }
-
-    /* ─── JSON: global kill switch (exit all positions, then stop bot) ─── */
-    if (path === '/api/kill-switch' && method === 'POST') {
-      this.killSwitch?.activate();
-      const result = await this.exitAllOpenPositionsAndStop();
-      if (!result.ok) {
-        json(res, 500, {
-          ok: false,
-          error: 'Failed to close all positions. Bot was not stopped.',
-          closedOrders: result.closedOrders,
-          failedOrders: result.failedOrders,
-          errors: result.errors,
-        });
-      } else {
-        json(res, 200, {
-          ok: true,
-          message: 'Kill Switch executed. All open positions were exited. Bot is stopping.',
-          closedOrders: result.closedOrders,
-          failedOrders: result.failedOrders,
-          errors: result.errors,
-        });
-      }
+    if (await handleDashboardCoreRoutes(req, res, path, method, {
+      walletManager: this.walletManager,
+      walletDisplayNames: this.walletDisplayNames,
+      engine: this.engine,
+      getLiveMarketPrices: () => this.getLiveMarketPrices(),
+      runKillSwitch: async () => {
+        this.killSwitch?.activate();
+        return this.exitAllOpenPositionsAndStop();
+      },
+      json,
+    })) {
       return;
     }
 
@@ -291,176 +256,23 @@ export class DashboardServer {
       return;
     }
 
-    /* ─── JSON: all trades across all wallets (for Trade Log) ─── */
-    if (path === '/api/trades/all' && method === 'GET') {
-      const allTradesMap = this.walletManager.getAllTradeHistories();
-      const wallets = this.walletManager.listWallets();
-      const allTrades: Array<{
-        orderId: string;
-        walletId: string;
-        walletName: string;
-        strategy: string;
-        marketId: string;
-        outcome: string;
-        side: string;
-        price: number;
-        size: number;
-        cost: number;
-        realizedPnl: number;
-        cumulativePnl: number;
-        balanceAfter: number;
-        timestamp: number;
-      }> = [];
-      for (const [walletId, trades] of allTradesMap) {
-        const ws = wallets.find((w) => w.walletId === walletId);
-        const walletName =
-          this.walletDisplayNames.get(walletId) ?? ws?.assignedStrategy ?? walletId;
-        const strategy = ws?.assignedStrategy ?? 'unknown';
-        for (const t of trades) {
-          allTrades.push({
-            orderId: t.orderId,
-            walletId: t.walletId,
-            walletName,
-            strategy,
-            marketId: t.marketId,
-            outcome: t.outcome,
-            side: t.side,
-            price: t.price,
-            size: t.size,
-            cost: t.cost,
-            realizedPnl: t.realizedPnl,
-            cumulativePnl: t.cumulativePnl,
-            balanceAfter: t.balanceAfter,
-            timestamp: t.timestamp,
-          });
-        }
-      }
-      allTrades.sort((a, b) => a.timestamp - b.timestamp);
-      const totalRealizedPnl = wallets.reduce((s, w) => s + w.realizedPnl, 0);
-      const totalTrades = allTrades.length;
-      const winCount = allTrades.filter((t) => t.realizedPnl > 0).length;
-      const lossCount = allTrades.filter((t) => t.realizedPnl < 0).length;
-      const totalVolume = allTrades.reduce((s, t) => s + t.cost, 0);
-      json(res, 200, {
-        trades: allTrades,
-        summary: {
-          totalTrades,
-          totalRealizedPnl: Number(totalRealizedPnl.toFixed(4)),
-          winCount,
-          lossCount,
-          totalVolume: Number(totalVolume.toFixed(4)),
-        },
-      });
+    if (handleDashboardTradeRoutes(res, path, method, {
+      walletManager: this.walletManager,
+      walletDisplayNames: this.walletDisplayNames,
+      json,
+    })) {
       return;
     }
 
-    /* ─── JSON: trade history for a specific wallet ─── */
-    if (path.startsWith('/api/trades/') && method === 'GET') {
-      const walletId = decodeURIComponent(path.slice('/api/trades/'.length));
-      const trades = this.walletManager.getTradeHistory(walletId);
-      const walletState = this.walletManager.listWallets().find((w) => w.walletId === walletId);
-      if (!walletState) {
-        json(res, 404, { ok: false, error: `Wallet "${walletId}" not found` });
-        return;
-      }
-
-      /* compute summary stats */
-      const totalTrades = trades.length;
-      const buys = trades.filter((t) => t.side === 'BUY').length;
-      const sells = trades.filter((t) => t.side === 'SELL').length;
-      const totalPnl = walletState.realizedPnl;
-      const winningTrades = trades.filter((t) => t.realizedPnl > 0).length;
-      const losingTrades = trades.filter((t) => t.realizedPnl < 0).length;
-      const winRate = sells > 0 ? winningTrades / sells : 0;
-      const totalVolume = trades.reduce((s, t) => s + t.cost, 0);
-      const avgTradeSize = totalTrades > 0 ? totalVolume / totalTrades : 0;
-      const bestTrade = trades.reduce((best, t) => (t.realizedPnl > best ? t.realizedPnl : best), 0);
-      const worstTrade = trades.reduce((worst, t) => (t.realizedPnl < worst ? t.realizedPnl : worst), 0);
-
-      json(res, 200, {
-        walletId,
-        strategy: walletState.assignedStrategy,
-        mode: walletState.mode,
-        summary: {
-          totalTrades,
-          buys,
-          sells,
-          totalPnl: Number(totalPnl.toFixed(4)),
-          winningTrades,
-          losingTrades,
-          winRate: Number(winRate.toFixed(4)),
-          totalVolume: Number(totalVolume.toFixed(4)),
-          avgTradeSize: Number(avgTradeSize.toFixed(4)),
-          bestTrade: Number(bestTrade.toFixed(4)),
-          worstTrade: Number(worstTrade.toFixed(4)),
-          capitalAllocated: walletState.capitalAllocated,
-          availableBalance: Number(walletState.availableBalance.toFixed(4)),
-        },
-        trades,
-      });
-      return;
-    }
-
-    /* ─── JSON: live markets from Polymarket Gamma API ─── */
-    if (path === '/api/markets' && method === 'GET') {
-      try {
-        const fetcher = new MarketFetcher();
-        const markets = await fetcher.fetchSnapshot();
-        json(res, 200, markets);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        json(res, 500, { ok: false, error: msg });
-      }
-      return;
-    }
-
-    /* ─── Whale API routes (delegated) ─── */
-    if (path.startsWith('/api/whales') && this.whaleApi) {
-      const handled = await this.whaleApi.handleRequest(req, res);
-      if (handled) return;
-    }
-
-    /* ─── Console API routes ─── */
-    if (path === '/api/console/stream' && method === 'GET') {
-      consoleLog.addSSEClient(res);
-      return;                // SSE connection stays open
-    }
-
-    if (path === '/api/console/logs' && method === 'GET') {
-      const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
-      const limit = Number(url.searchParams.get('limit')) || 500;
-      const offset = Number(url.searchParams.get('offset')) || 0;
-      json(res, 200, consoleLog.getEntries(limit, offset));
-      return;
-    }
-
-    if (path === '/api/console/stats' && method === 'GET') {
-      json(res, 200, consoleLog.getStats());
-      return;
-    }
-
-    /* ─── SSE: Real-time dashboard data stream ─── */
-    if (path === '/api/stream' && method === 'GET') {
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        Connection: 'keep-alive',
-        'Access-Control-Allow-Origin': '*',
-      });
-      res.write(':\n\n');  // comment to establish connection
-
-      this.sseClients.add(res);
-      req.on('close', () => this.sseClients.delete(res));
-
-      // Send initial data immediately
-      const payload = buildDashboardPayload(
-        this.walletManager.listWallets(),
-        this.walletManager.getAllTradeHistories(),
-        this.getLiveMarketPrices(),
-        this.engine?.getPausedWallets(),
-        this.walletDisplayNames,
-      );
-      res.write(`event: dashboard\ndata: ${JSON.stringify(payload)}\n\n`);
+    if (await handleDashboardOperationalRoutes(req, res, path, method, {
+      walletManager: this.walletManager,
+      walletDisplayNames: this.walletDisplayNames,
+      whaleApi: this.whaleApi,
+      engine: this.engine,
+      sseClients: this.sseClients,
+      getLiveMarketPrices: () => this.getLiveMarketPrices(),
+      json,
+    })) {
       return;
     }
 

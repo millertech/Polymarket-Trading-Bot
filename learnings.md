@@ -38,6 +38,8 @@
 - Extracting the dashboard HTML/JS template into its own module makes server-side routing and API logic much easier to navigate.
 - Extracting wallet-related dashboard routes into a dedicated handler module keeps DashboardServer routing focused while preserving endpoint behavior.
 - Extracting strategy and copy-trade dashboard routes into a dedicated handler module further reduced DashboardServer monolith surface with no endpoint behavior change.
+- Extracting trade endpoints and operational market/whale/console/SSE routes into dedicated modules keeps DashboardServer focused on orchestration and shared middleware concerns.
+- Extracting core dashboard routes (HTML/data/counters/kill-switch) into a dedicated handler completed DashboardServer route modularization and left the server class focused on lifecycle, shared state, and delegation.
 
 ## Design Choices
 - Added `runtime_wallet_snapshot` table for one-row latest snapshot storage.
@@ -76,6 +78,8 @@
   - `tests/dashboard_server_hardening.test.ts` remains green after extracting dashboard template module.
   - `tests/dashboard_server_hardening.test.ts` remains green after extracting wallet route handlers into `dashboard_wallet_routes.ts`.
   - `tests/dashboard_server_hardening.test.ts` remains green after extracting strategy/copy-trade route handlers into `dashboard_strategy_routes.ts`.
+  - `tests/dashboard_server_hardening.test.ts` remains green after extracting trade routes and operational routes into dedicated handler modules.
+  - `tests/dashboard_server_hardening.test.ts` remains green after extracting core dashboard routes into `dashboard_core_routes.ts`.
 - Added tests for persistence and reliability:
   - runtime SQLite snapshot persistence/load/clear
   - kill-switch state persistence/load
