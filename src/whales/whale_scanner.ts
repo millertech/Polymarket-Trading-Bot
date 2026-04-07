@@ -1937,7 +1937,8 @@ export class WhaleScanner {
     maxBytes: number,
     label: string,
   ): Promise<T | null> {
-    const declared = this.parseContentLength(response.headers.get('content-length'));
+    const headerGetter = (response as unknown as { headers?: { get?: (name: string) => string | null } }).headers?.get;
+    const declared = this.parseContentLength(typeof headerGetter === 'function' ? headerGetter.call(response.headers, 'content-length') : null);
     if (declared !== null && declared > maxBytes) {
       logger.warn({ url, label, declaredBytes: declared, maxBytes }, 'Skipping oversized JSON payload');
       return null;
@@ -1945,8 +1946,24 @@ export class WhaleScanner {
 
     const body = response.body;
     if (!body) {
-      logger.warn({ url, label }, 'Response body missing');
-      return null;
+      // Test doubles often provide only json(); keep a safe fallback path.
+      const fallbackJson = (response as unknown as { json?: () => Promise<unknown> }).json;
+      if (typeof fallbackJson !== 'function') {
+        logger.warn({ url, label }, 'Response body missing');
+        return null;
+      }
+      try {
+        const payload = await fallbackJson.call(response);
+        const textSize = Buffer.byteLength(JSON.stringify(payload), 'utf8');
+        if (textSize > maxBytes) {
+          logger.warn({ url, label, totalBytes: textSize, maxBytes }, 'Aborted oversized JSON payload');
+          return null;
+        }
+        return payload as T;
+      } catch (error) {
+        logger.warn({ url, label, error }, 'Failed to parse fallback JSON payload');
+        throw error;
+      }
     }
 
     const reader = body.getReader();

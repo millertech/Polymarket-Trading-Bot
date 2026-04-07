@@ -14,14 +14,17 @@ import { listStrategies } from './strategies/registry';
 import { computeAllPerformance } from './reporting/performance';
 import { logger } from './reporting/logs';
 import { DashboardServer } from './reporting/dashboard_server';
+import { Database } from './storage/database';
 import { WhaleService } from './whales/whale_service';
 import { WhaleAPI } from './whales/whale_api';
 import { DEFAULT_WHALE_CONFIG, DEFAULT_SCANNER_CONFIG, DEFAULT_API_POOL_CONFIG, DEFAULT_FAST_SCAN_CONFIG, DEFAULT_EXCHANGE_SOURCES } from './whales/whale_types';
 import type { WhaleTrackingConfig, ScannerConfig } from './whales/whale_types';
+import { exportRuntimeCountersState, importRuntimeCountersState } from './reporting/runtime_counters';
 
 const program = new Command();
 const statePath = path.resolve('.runtime/state.json');
 const walletSnapshotPath = path.resolve('.runtime/wallet-runtime.snapshot.json');
+const runtimeDbPath = path.resolve('.runtime/bot-state.sqlite');
 
 /* ── Config normalization helpers ── */
 
@@ -206,10 +209,20 @@ program
   .option('-c, --config <path>', 'Config path', 'config.yaml')
   .action(async (options: { config: string }) => {
     const config = loadConfig(options.config);
+    const runtimeDb = new Database(runtimeDbPath);
+    await runtimeDb.connect();
+
     const walletManager = new WalletManager();
     for (const wallet of config.wallets) {
       walletManager.registerWallet(wallet, wallet.strategy, config.environment.enableLiveTrading);
     }
+
+    const killSwitch = new KillSwitch();
+    killSwitch.onChange((enabled) => {
+      void runtimeDb.saveKillSwitchState(enabled).catch((error) => {
+        logger.warn({ err: String(error), enabled }, 'Failed to persist kill-switch state');
+      });
+    });
 
     const clearRuntimeOnStart = shouldClearWalletRuntimeOnStart(config.environment.enableLiveTrading);
     if (clearRuntimeOnStart && fs.existsSync(walletSnapshotPath)) {
@@ -224,13 +237,19 @@ program
         'Cleared wallet runtime snapshot before startup',
       );
     }
+    if (clearRuntimeOnStart) {
+      await runtimeDb.clearRuntimeSnapshot();
+    }
 
-    const runtimeSnapshot = clearRuntimeOnStart ? null : loadWalletSnapshot();
+    const runtimeSnapshot = clearRuntimeOnStart
+      ? null
+      : (await runtimeDb.loadRuntimeSnapshot()) ?? loadWalletSnapshot();
     if (runtimeSnapshot) {
       const rehydration = walletManager.rehydrateFromRuntimeSnapshot(runtimeSnapshot);
       logger.info(
         {
           snapshot: walletSnapshotPath,
+          database: runtimeDbPath,
           restoredWallets: rehydration.restored,
           skippedWallets: rehydration.skipped,
           savedAt: runtimeSnapshot.savedAt,
@@ -239,12 +258,28 @@ program
       );
     }
 
+    if (!clearRuntimeOnStart) {
+      const persistedKillSwitch = await runtimeDb.loadKillSwitchState();
+      if (persistedKillSwitch === true) {
+        killSwitch.setState(true);
+        logger.warn({ source: runtimeDbPath }, 'Restored persisted kill-switch state as ACTIVE');
+      }
+
+      const persistedCounters = await runtimeDb.loadExecutionCountersState();
+      if (persistedCounters) {
+        const restored = importRuntimeCountersState(persistedCounters);
+        if (restored) {
+          logger.info({ source: runtimeDbPath }, 'Restored persisted runtime counters state');
+        }
+      }
+    }
+
     if (config.environment.enableLiveTrading) {
       await walletManager.runLivePreflight();
     }
 
     const dashboardPort = Number(process.env.DASHBOARD_PORT ?? 3000);
-    const dashboardServer = new DashboardServer(walletManager, dashboardPort);
+    const dashboardServer = new DashboardServer(walletManager, dashboardPort, killSwitch);
 
     /* ── Whale Tracking Engine ── */
     const rawConfig = YAML.parse(fs.readFileSync(options.config, 'utf8')) as Record<string, unknown>;
@@ -267,7 +302,6 @@ program
     }
 
     dashboardServer.start();
-    const killSwitch = new KillSwitch();
     const riskEngine = new RiskEngine(killSwitch);
     const orderRouter = new OrderRouter(walletManager, riskEngine, new TradeExecutor());
 
@@ -276,28 +310,62 @@ program
     dashboardServer.setEngine(engine);
     engine.start();
 
-    // Persist runtime wallet state every 10 seconds for restart rehydration.
-    const snapshotTimer = setInterval(() => {
-      try {
-        saveWalletSnapshot(walletManager);
-      } catch (error) {
-        logger.warn({ err: String(error) }, 'Failed to persist wallet runtime snapshot');
-      }
-    }, 10_000);
+    let snapshotPersistInFlight = false;
+    let shutdownInProgress = false;
 
-    const gracefulPersistAndExit = (signal: string): void => {
-      try {
-        clearInterval(snapshotTimer);
-        saveWalletSnapshot(walletManager);
-        logger.info({ signal, snapshot: walletSnapshotPath }, 'Saved wallet runtime snapshot before shutdown');
-      } catch (error) {
-        logger.warn({ err: String(error), signal }, 'Failed to save wallet runtime snapshot on shutdown');
+    const persistRuntimeState = async (context: 'interval' | 'shutdown', signal?: string): Promise<void> => {
+      const snapshot = walletManager.createRuntimeSnapshot();
+      saveWalletSnapshot(walletManager);
+      await Promise.all([
+        runtimeDb.saveRuntimeSnapshot(snapshot),
+        runtimeDb.saveExecutionCountersState(exportRuntimeCountersState()),
+      ]);
+
+      if (context === 'shutdown') {
+        logger.info(
+          { signal, snapshot: walletSnapshotPath, database: runtimeDbPath },
+          'Saved wallet runtime snapshot and counters before shutdown',
+        );
       }
-      process.exit(0);
     };
 
-    process.once('SIGINT', () => gracefulPersistAndExit('SIGINT'));
-    process.once('SIGTERM', () => gracefulPersistAndExit('SIGTERM'));
+    // Persist runtime wallet state every 10 seconds for restart rehydration.
+    const snapshotTimer = setInterval(() => {
+      if (snapshotPersistInFlight) return;
+      snapshotPersistInFlight = true;
+      void persistRuntimeState('interval')
+        .catch((error) => {
+          logger.warn({ err: String(error) }, 'Failed to persist wallet runtime snapshot');
+        })
+        .finally(() => {
+          snapshotPersistInFlight = false;
+        });
+    }, 10_000);
+
+    const gracefulPersistAndExit = async (signal: string): Promise<void> => {
+      if (shutdownInProgress) return;
+      shutdownInProgress = true;
+
+      try {
+        clearInterval(snapshotTimer);
+        await persistRuntimeState('shutdown', signal);
+      } catch (error) {
+        logger.warn({ err: String(error), signal }, 'Failed to save wallet runtime snapshot/counters on shutdown');
+      }
+
+      try {
+        await runtimeDb.close();
+      } finally {
+        process.exit(0);
+      }
+    };
+
+    process.once('SIGINT', () => {
+      void gracefulPersistAndExit('SIGINT');
+    });
+    process.once('SIGTERM', () => {
+      void gracefulPersistAndExit('SIGTERM');
+    });
 
     writeState({ status: 'running', startedAt: new Date().toISOString() });
   });

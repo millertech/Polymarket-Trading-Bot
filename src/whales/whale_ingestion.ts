@@ -5,6 +5,11 @@
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
 import { logger } from '../reporting/logs';
+import {
+  recordWhaleIngestionAuthCircuitOpened,
+  recordWhaleIngestionAuthCircuitShortCircuit,
+  recordWhaleIngestionClob4xxSuppressed,
+} from '../reporting/runtime_counters';
 import type { WhaleDB } from './whale_db';
 import type { WhaleTrade, WhaleTrackingConfig, AggressorSide } from './whale_types';
 
@@ -12,6 +17,7 @@ const FETCH_TIMEOUT_MS = Number(process.env.SCANNER_FETCH_TIMEOUT_MS ?? '20000')
 const FETCH_MAX_RETRIES = Number(process.env.SCANNER_FETCH_RETRIES ?? '4');
 const FETCH_BACKOFF_BASE_MS = Number(process.env.SCANNER_FETCH_BACKOFF_MS ?? '800');
 const FETCH_BACKOFF_MAX_MS = Number(process.env.SCANNER_FETCH_MAX_BACKOFF_MS ?? '6000');
+const INGESTION_CLOB_ERROR_LOG_WINDOW_MS = Number(process.env.SCANNER_CLOB_ERROR_LOG_WINDOW_MS ?? '10000');
 const INGESTION_TRADES_JSON_MAX_BYTES = Number(process.env.SCANNER_TRADES_JSON_MAX_BYTES ?? '16777216');
 const INGESTION_BOOK_JSON_MAX_BYTES = Number(process.env.SCANNER_SMALL_JSON_MAX_BYTES ?? '1048576');
 const INGESTION_MARKETS_JSON_MAX_BYTES = Number(process.env.SCANNER_MARKETS_JSON_MAX_BYTES ?? '8388608');
@@ -56,6 +62,11 @@ export class WhaleIngestion {
   private requestTimestamps: number[] = [];
   private consecutiveErrors = 0;
   private maxConsecutiveErrors = 10;
+  private readonly clobErrorLogState = new Map<string, { lastLoggedAt: number; suppressed: number }>();
+  private readonly authFailureThreshold = Number(process.env.SCANNER_CLOB_AUTH_FAILURE_THRESHOLD ?? '20');
+  private readonly authCooldownMs = Number(process.env.SCANNER_CLOB_AUTH_COOLDOWN_MS ?? '120000');
+  private authFailureCount = 0;
+  private authBlockedUntil = 0;
   private marketMetadataCache: Map<string, { question: string; slug: string; outcomes: string[] }> = new Map();
   private metadataCacheLoadedAt = 0;
 
@@ -379,6 +390,13 @@ export class WhaleIngestion {
   }
 
   private async fetchWithRetry(url: string, maxRetries = FETCH_MAX_RETRIES, timeoutMs = FETCH_TIMEOUT_MS): Promise<Response | null> {
+    if (this.isAuthCircuitOpen()) {
+      const remainingMs = Math.max(0, this.authBlockedUntil - Date.now());
+      recordWhaleIngestionAuthCircuitShortCircuit();
+      logger.warn({ remainingMs, url: this.redactMakerAddress(url) }, 'Skipping CLOB request while auth circuit breaker is open');
+      return null;
+    }
+
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -388,7 +406,10 @@ export class WhaleIngestion {
           headers: { accept: 'application/json' },
         });
         clearTimeout(timer);
-        if (res.ok) return res;
+        if (res.ok) {
+          this.resetAuthCircuit();
+          return res;
+        }
         if (res.status === 429) {
           const retryAfter = parseInt(res.headers.get('retry-after') || '5', 10);
           logger.warn({ retryAfter, attempt }, 'Rate limited, backing off');
@@ -401,7 +422,10 @@ export class WhaleIngestion {
           continue;
         }
         // 4xx (non-429) — don't retry
-        logger.error({ status: res.status, url: url.replace(/maker_address=0x[a-fA-F0-9]+/, 'maker_address=REDACTED') }, 'CLOB request failed');
+        if (res.status === 401 || res.status === 403) {
+          this.recordAuthFailure(url, res.status);
+        }
+        this.logClob4xxFailure(url, res.status);
         return null;
       } catch (err: any) {
         clearTimeout(timer);
@@ -416,6 +440,61 @@ export class WhaleIngestion {
       }
     }
     return null;
+  }
+
+  private redactMakerAddress(url: string): string {
+    return url.replace(/maker_address=0x[a-fA-F0-9]+/, 'maker_address=REDACTED');
+  }
+
+  private isAuthCircuitOpen(): boolean {
+    return Date.now() < this.authBlockedUntil;
+  }
+
+  private resetAuthCircuit(): void {
+    this.authFailureCount = 0;
+    this.authBlockedUntil = 0;
+  }
+
+  private recordAuthFailure(url: string, status: number): void {
+    this.authFailureCount += 1;
+    if (this.authFailureCount < this.authFailureThreshold) return;
+
+    if (this.isAuthCircuitOpen()) return;
+
+    this.authBlockedUntil = Date.now() + this.authCooldownMs;
+    recordWhaleIngestionAuthCircuitOpened();
+    logger.warn(
+      {
+        status,
+        failures: this.authFailureCount,
+        threshold: this.authFailureThreshold,
+        cooldownMs: this.authCooldownMs,
+        url: this.redactMakerAddress(url),
+      },
+      'Opening CLOB auth circuit breaker due to repeated unauthorized responses',
+    );
+  }
+
+  private logClob4xxFailure(url: string, status: number): void {
+    const safeUrl = this.redactMakerAddress(url);
+    const key = `${status}:${safeUrl}`;
+    const now = Date.now();
+    const state = this.clobErrorLogState.get(key);
+
+    if (!state || now - state.lastLoggedAt >= INGESTION_CLOB_ERROR_LOG_WINDOW_MS) {
+      const suppressedInWindow = state?.suppressed ?? 0;
+      const logPayload = { status, url: safeUrl, suppressedInWindow };
+      if (status === 401 || status === 403) {
+        logger.warn(logPayload, 'CLOB request unauthorized/forbidden');
+      } else {
+        logger.error(logPayload, 'CLOB request failed');
+      }
+      this.clobErrorLogState.set(key, { lastLoggedAt: now, suppressed: 0 });
+      return;
+    }
+
+    state.suppressed += 1;
+    recordWhaleIngestionClob4xxSuppressed();
   }
 
   private parseContentLength(value: string | null): number | null {

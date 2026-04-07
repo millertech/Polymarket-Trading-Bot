@@ -527,6 +527,7 @@ export class PolymarketWallet {
     const funder = process.env.POLYMARKET_FUNDER_ADDRESS as string;
     const signatureType = Number(process.env.POLYMARKET_SIGNATURE_TYPE ?? '2');
     const signer = new Wallet(privateKey);
+    const clobSigner = signer as unknown as ConstructorParameters<typeof ClobClient>[2];
 
     const shouldForceDerive = forceDeriveCreds || this.forceDeriveL2Creds;
     const providedCreds = shouldForceDerive ? null : this.readProvidedApiCreds();
@@ -537,7 +538,7 @@ export class PolymarketWallet {
     this.clobClient = new ClobClient(
       this.clobApi,
       this.chainId,
-      signer,
+      clobSigner,
       apiCreds,
       signatureType,
       funder,
@@ -565,7 +566,11 @@ export class PolymarketWallet {
   }
 
   private async deriveApiCreds(signer: Wallet): Promise<PolyApiCreds> {
-    const tempClient = new ClobClient(this.clobApi, this.chainId, signer);
+    const tempClient = new ClobClient(
+      this.clobApi,
+      this.chainId,
+      signer as unknown as ConstructorParameters<typeof ClobClient>[2],
+    );
     const derived = await this.withTimeout(
       tempClient.createOrDeriveApiKey(),
       this.l2DeriveTimeoutMs,

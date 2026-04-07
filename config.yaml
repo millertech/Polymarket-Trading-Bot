@@ -3,7 +3,7 @@ environment:
 
 wallets:
   - id: wallet_1
-    mode: LIVE
+    mode: PAPER
     strategy: cross_market_arbitrage
     capital: 1000
     risk_limits:

@@ -49,17 +49,18 @@ export class WalletManager {
       throw new Error(`Wallet ${config.id} already registered`);
     }
 
+    const effectiveMode = config.mode === 'LIVE' && !enableLive ? 'PAPER' : config.mode;
     if (config.mode === 'LIVE' && !enableLive) {
-      throw new Error(
-        `Wallet ${config.id} is configured as LIVE but live trading is not fully enabled `
-        + '(require both config.environment.enable_live_trading=true and ENABLE_LIVE_TRADING=true)',
+      logger.warn(
+        { walletId: config.id },
+        `Wallet ${config.id} configured as LIVE while live trading is disabled; falling back to PAPER mode`,
       );
     }
 
     const wallet =
-      config.mode === 'LIVE'
+      effectiveMode === 'LIVE'
         ? new PolymarketWallet(config, assignedStrategy)
-        : new PaperWallet(config, assignedStrategy);
+        : new PaperWallet({ ...config, mode: 'PAPER' }, assignedStrategy);
 
     this.wallets.set(config.id, wallet);
     const state = wallet.getState();

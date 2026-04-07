@@ -4,8 +4,22 @@ import { RiskEngine } from '../risk/risk_engine';
 import { TradeExecutor } from './trade_executor';
 import { logger } from '../reporting/logs';
 import { consoleLog } from '../reporting/console_log';
+import {
+  recordExecutionRouteAttempt,
+  recordExecutionRouteFailure,
+  recordExecutionRouteLatency,
+  recordExecutionRouteSuccess,
+  recordExecutionSubmitAttempt,
+  recordExecutionSubmitFailure,
+  recordExecutionSubmitLatency,
+  recordOrderRouterRiskRejection,
+  recordOrderRouterRiskSuppressed,
+} from '../reporting/runtime_counters';
 
 export class OrderRouter {
+  private readonly riskLogWindowMs = Number(process.env.RISK_LOG_DEDUPE_WINDOW_MS ?? '5000');
+  private readonly riskLogState = new Map<string, { lastLoggedAt: number; suppressed: number }>();
+
   constructor(
     private readonly walletManager: WalletManager,
     private readonly riskEngine: RiskEngine,
@@ -13,6 +27,9 @@ export class OrderRouter {
   ) {}
 
   async route(order: OrderRequest): Promise<boolean> {
+    const routeStartedAt = Date.now();
+    recordExecutionRouteAttempt();
+
     const wallet = this.walletManager.getWallet(order.walletId);
     if (!wallet) {
       logger.warn({ walletId: order.walletId }, 'Wallet not found');
@@ -20,26 +37,64 @@ export class OrderRouter {
         walletId: order.walletId,
         marketId: order.marketId,
       });
+      recordExecutionRouteFailure();
+      recordExecutionRouteLatency(Date.now() - routeStartedAt);
       return false;
     }
 
     const state = wallet.getState();
     const risk = this.riskEngine.check(order, state);
     if (!risk.ok) {
-      logger.warn({ walletId: order.walletId, reason: risk.reason }, 'Risk check failed');
-      consoleLog.warn('RISK', `Risk rejected: ${risk.reason} [${order.walletId}] ${order.side} ${order.outcome} ×${order.size}`, {
-        walletId: order.walletId,
-        marketId: order.marketId,
-        reason: risk.reason,
-        side: order.side,
-        outcome: order.outcome,
-        price: order.price,
-        size: order.size,
-      });
+      recordOrderRouterRiskRejection();
+      const reason = risk.reason ?? 'Unknown risk rejection';
+      const dedupeKey = `${order.walletId}:${reason}`;
+      const now = Date.now();
+      const dedupe = this.riskLogState.get(dedupeKey);
+
+      if (!dedupe || now - dedupe.lastLoggedAt >= this.riskLogWindowMs) {
+        const suppressedInWindow = dedupe?.suppressed ?? 0;
+        logger.warn(
+          { walletId: order.walletId, reason, suppressedInWindow },
+          'Risk check failed',
+        );
+        consoleLog.warn('RISK', `Risk rejected: ${reason} [${order.walletId}] ${order.side} ${order.outcome} ×${order.size}`, {
+          walletId: order.walletId,
+          marketId: order.marketId,
+          reason,
+          side: order.side,
+          outcome: order.outcome,
+          price: order.price,
+          size: order.size,
+          suppressedInWindow,
+        });
+        this.riskLogState.set(dedupeKey, { lastLoggedAt: now, suppressed: 0 });
+      } else {
+        dedupe.suppressed += 1;
+        recordOrderRouterRiskSuppressed();
+      }
+
+      recordExecutionRouteFailure();
+      recordExecutionRouteLatency(Date.now() - routeStartedAt);
       return false;
     }
 
-    await this.tradeExecutor.execute(order, wallet);
-    return true;
+    const submitStartedAt = Date.now();
+    recordExecutionSubmitAttempt();
+
+    try {
+      await this.tradeExecutor.execute(order, wallet);
+      recordExecutionSubmitLatency(Date.now() - submitStartedAt);
+      recordExecutionRouteSuccess();
+      return true;
+    } catch (error) {
+      recordExecutionSubmitLatency(Date.now() - submitStartedAt);
+      const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+      const isTimeout = message.includes('timeout') || message.includes('timed out') || message.includes('abort');
+      recordExecutionSubmitFailure(isTimeout);
+      recordExecutionRouteFailure();
+      throw error;
+    } finally {
+      recordExecutionRouteLatency(Date.now() - routeStartedAt);
+    }
   }
 }
