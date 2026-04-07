@@ -54,6 +54,9 @@ interface OrderbookSnapshot {
 export class WhaleIngestion {
   private db: WhaleDB;
   private static readonly MAX_METADATA_CACHE = 10_000;
+  private static readonly MAX_CLOB_ERROR_LOG_KEYS = Number(process.env.SCANNER_CLOB_ERROR_LOG_MAX_KEYS ?? '5000');
+  private static readonly CLOB_ERROR_LOG_RETENTION_MS = Number(process.env.SCANNER_CLOB_ERROR_LOG_RETENTION_MS ?? '600000');
+  private static readonly CLOB_ERROR_LOG_CLEANUP_INTERVAL_MS = Number(process.env.SCANNER_CLOB_ERROR_LOG_CLEANUP_INTERVAL_MS ?? '30000');
   private clobApi: string;
   private gammaApi: string;
   private config: WhaleTrackingConfig;
@@ -67,6 +70,7 @@ export class WhaleIngestion {
   private readonly authCooldownMs = Number(process.env.SCANNER_CLOB_AUTH_COOLDOWN_MS ?? '120000');
   private authFailureCount = 0;
   private authBlockedUntil = 0;
+  private lastClobErrorLogCleanupAt = 0;
   private marketMetadataCache: Map<string, { question: string; slug: string; outcomes: string[] }> = new Map();
   private metadataCacheLoadedAt = 0;
 
@@ -340,7 +344,7 @@ export class WhaleIngestion {
       );
       if (!Array.isArray(markets)) return;
       this.marketMetadataCache.clear();
-      for (const m of markets) {
+      for (const m of markets.slice(0, WhaleIngestion.MAX_METADATA_CACHE)) {
         this.marketMetadataCache.set(m.id, {
           question: m.question,
           slug: m.slug,
@@ -476,6 +480,8 @@ export class WhaleIngestion {
   }
 
   private logClob4xxFailure(url: string, status: number): void {
+    this.cleanupClobErrorLogState(Date.now());
+
     const safeUrl = this.redactMakerAddress(url);
     const key = `${status}:${safeUrl}`;
     const now = Date.now();
@@ -495,6 +501,28 @@ export class WhaleIngestion {
 
     state.suppressed += 1;
     recordWhaleIngestionClob4xxSuppressed();
+  }
+
+  private cleanupClobErrorLogState(now: number): void {
+    if (now - this.lastClobErrorLogCleanupAt < WhaleIngestion.CLOB_ERROR_LOG_CLEANUP_INTERVAL_MS) return;
+    this.lastClobErrorLogCleanupAt = now;
+
+    for (const [key, value] of this.clobErrorLogState.entries()) {
+      if (now - value.lastLoggedAt > WhaleIngestion.CLOB_ERROR_LOG_RETENTION_MS) {
+        this.clobErrorLogState.delete(key);
+      }
+    }
+
+    if (this.clobErrorLogState.size <= WhaleIngestion.MAX_CLOB_ERROR_LOG_KEYS) return;
+
+    const entriesByAge = Array.from(this.clobErrorLogState.entries())
+      .sort((a, b) => a[1].lastLoggedAt - b[1].lastLoggedAt);
+    const toDelete = this.clobErrorLogState.size - WhaleIngestion.MAX_CLOB_ERROR_LOG_KEYS;
+    for (let i = 0; i < toDelete; i += 1) {
+      const entry = entriesByAge[i];
+      if (!entry) break;
+      this.clobErrorLogState.delete(entry[0]);
+    }
   }
 
   private parseContentLength(value: string | null): number | null {

@@ -40,6 +40,9 @@
 - Extracting strategy and copy-trade dashboard routes into a dedicated handler module further reduced DashboardServer monolith surface with no endpoint behavior change.
 - Extracting trade endpoints and operational market/whale/console/SSE routes into dedicated modules keeps DashboardServer focused on orchestration and shared middleware concerns.
 - Extracting core dashboard routes (HTML/data/counters/kill-switch) into a dedicated handler completed DashboardServer route modularization and left the server class focused on lifecycle, shared state, and delegation.
+- Lightweight periodic memory sampling in runtime counters (`process.memoryUsage` + `v8.getHeapStatistics`) gives early warning for sustained heap growth without requiring separate profiling sessions.
+- Dedupe/suppression maps that key by dynamic values must include TTL cleanup and max-size caps, otherwise memory grows slowly but unbounded over long live sessions.
+- Trade history retention should be enforced during rehydration, not only during append, to prevent snapshot restore from reintroducing oversized in-memory arrays.
 
 ## Design Choices
 - Added `runtime_wallet_snapshot` table for one-row latest snapshot storage.

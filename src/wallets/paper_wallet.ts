@@ -5,7 +5,10 @@ import { logger } from '../reporting/logs';
 import { consoleLog } from '../reporting/console_log';
 
 export class PaperWallet {
-  private static readonly MAX_TRADE_HISTORY = 10_000;
+  private static readonly MAX_TRADE_HISTORY = Math.max(
+    100,
+    Number(process.env.WALLET_MAX_TRADE_HISTORY ?? '10000'),
+  );
   private state: WalletState;
   private readonly fillSimulator = new FillSimulator();
   private readonly pnlTracker = new PnlTracker();
@@ -71,7 +74,8 @@ export class PaperWallet {
     this.state.realizedPnl = snapshot.state.realizedPnl;
     this.state.openPositions = (snapshot.state.openPositions ?? []).map((p) => ({ ...p }));
 
-    this.trades.splice(0, this.trades.length, ...(snapshot.trades ?? []).map((t) => ({ ...t })));
+    const restoredTrades = (snapshot.trades ?? []).slice(-PaperWallet.MAX_TRADE_HISTORY);
+    this.trades.splice(0, this.trades.length, ...restoredTrades.map((t) => ({ ...t })));
     if (snapshot.displayName && snapshot.displayName.trim()) {
       this.displayName = snapshot.displayName.trim();
     }

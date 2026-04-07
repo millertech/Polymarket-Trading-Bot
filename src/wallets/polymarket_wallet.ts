@@ -17,7 +17,10 @@ type PolyApiCreds = {
 };
 
 export class PolymarketWallet {
-  private static readonly MAX_TRADE_HISTORY = 10_000;
+  private static readonly MAX_TRADE_HISTORY = Math.max(
+    100,
+    Number(process.env.WALLET_MAX_TRADE_HISTORY ?? '10000'),
+  );
   private static readonly MIN_MARKETABLE_BUY_NOTIONAL_USD = 1;
   private static hasLoggedL2Credentials = false;
   private state: WalletState;
@@ -111,7 +114,8 @@ export class PolymarketWallet {
     this.state.realizedPnl = snapshot.state.realizedPnl;
     this.state.openPositions = (snapshot.state.openPositions ?? []).map((p) => ({ ...p }));
 
-    this.trades.splice(0, this.trades.length, ...(snapshot.trades ?? []).map((t) => ({ ...t })));
+    const restoredTrades = (snapshot.trades ?? []).slice(-PolymarketWallet.MAX_TRADE_HISTORY);
+    this.trades.splice(0, this.trades.length, ...restoredTrades.map((t) => ({ ...t })));
     if (snapshot.displayName && snapshot.displayName.trim()) {
       this.displayName = snapshot.displayName.trim();
     }

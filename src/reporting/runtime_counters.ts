@@ -1,3 +1,6 @@
+import v8 from 'v8';
+import { PerformanceObserver } from 'perf_hooks';
+
 export type RuntimeCountersSnapshot = {
   dashboard: {
     apiRequests: number;
@@ -33,6 +36,33 @@ export type RuntimeCountersSnapshot = {
     submitLatencyRecentAvgMs: number;
     submitLatencyP95Ms: number;
     submitLatencyP99Ms: number;
+  };
+  runtime?: {
+    memory: {
+      rssBytes: number;
+      heapUsedBytes: number;
+      heapTotalBytes: number;
+      externalBytes: number;
+      arrayBuffersBytes: number;
+      heapLimitBytes: number;
+      heapUsedPct: number;
+      peakHeapUsedBytes: number;
+      peakRssBytes: number;
+      sampleCount: number;
+      lastSampleAtMs: number;
+      thresholdLevel: 'ok' | 'warn70' | 'warn85' | 'critical95';
+      thresholdCrossings: {
+        warn70: number;
+        warn85: number;
+        critical95: number;
+      };
+      gc: {
+        eventCount: number;
+        totalDurationMs: number;
+        avgDurationMs: number;
+        maxDurationMs: number;
+      };
+    };
   };
 };
 
@@ -96,7 +126,102 @@ const executionStats = {
   submitLatencyRolling: [] as number[],
 };
 
+const runtimeStats = {
+  rssBytes: 0,
+  heapUsedBytes: 0,
+  heapTotalBytes: 0,
+  externalBytes: 0,
+  arrayBuffersBytes: 0,
+  heapLimitBytes: 0,
+  heapUsedPct: 0,
+  peakHeapUsedBytes: 0,
+  peakRssBytes: 0,
+  sampleCount: 0,
+  lastSampleAtMs: 0,
+  thresholdLevel: 'ok' as 'ok' | 'warn70' | 'warn85' | 'critical95',
+  thresholdCrossings: {
+    warn70: 0,
+    warn85: 0,
+    critical95: 0,
+  },
+  gc: {
+    eventCount: 0,
+    totalDurationMs: 0,
+    avgDurationMs: 0,
+    maxDurationMs: 0,
+  },
+};
+
+let gcObserverInitialized = false;
+const MEMORY_SAMPLE_INTERVAL_MS = Math.max(1000, Number(process.env.RUNTIME_MEMORY_SAMPLE_MS ?? '10000'));
+
 const EXECUTION_ROLLING_WINDOW_SAMPLES = 200;
+
+function ensureGcObserver(): void {
+  if (gcObserverInitialized) return;
+  gcObserverInitialized = true;
+
+  try {
+    const gcObserver = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        const durationMs = Math.max(0, Number(entry.duration) || 0);
+        runtimeStats.gc.eventCount += 1;
+        runtimeStats.gc.totalDurationMs += durationMs;
+        runtimeStats.gc.maxDurationMs = Math.max(runtimeStats.gc.maxDurationMs, durationMs);
+      }
+      runtimeStats.gc.avgDurationMs = runtimeStats.gc.eventCount > 0
+        ? runtimeStats.gc.totalDurationMs / runtimeStats.gc.eventCount
+        : 0;
+    });
+    gcObserver.observe({ entryTypes: ['gc'] });
+  } catch {
+    // Some runtimes may not support GC performance entries.
+  }
+}
+
+function getThresholdLevel(heapUsedPct: number): 'ok' | 'warn70' | 'warn85' | 'critical95' {
+  if (heapUsedPct >= 95) return 'critical95';
+  if (heapUsedPct >= 85) return 'warn85';
+  if (heapUsedPct >= 70) return 'warn70';
+  return 'ok';
+}
+
+function sampleRuntimeMemory(): void {
+  ensureGcObserver();
+
+  const usage = process.memoryUsage();
+  const heap = v8.getHeapStatistics();
+  const heapLimitBytes = Math.max(0, Number(heap.heap_size_limit) || 0);
+  const heapUsedBytes = Math.max(0, Number(usage.heapUsed) || 0);
+  const heapUsedPct = heapLimitBytes > 0 ? (heapUsedBytes / heapLimitBytes) * 100 : 0;
+
+  runtimeStats.rssBytes = Math.max(0, Number(usage.rss) || 0);
+  runtimeStats.heapUsedBytes = heapUsedBytes;
+  runtimeStats.heapTotalBytes = Math.max(0, Number(usage.heapTotal) || 0);
+  runtimeStats.externalBytes = Math.max(0, Number(usage.external) || 0);
+  runtimeStats.arrayBuffersBytes = Math.max(0, Number(usage.arrayBuffers) || 0);
+  runtimeStats.heapLimitBytes = heapLimitBytes;
+  runtimeStats.heapUsedPct = heapUsedPct;
+  runtimeStats.peakHeapUsedBytes = Math.max(runtimeStats.peakHeapUsedBytes, runtimeStats.heapUsedBytes);
+  runtimeStats.peakRssBytes = Math.max(runtimeStats.peakRssBytes, runtimeStats.rssBytes);
+  runtimeStats.sampleCount += 1;
+  runtimeStats.lastSampleAtMs = Date.now();
+
+  const nextLevel = getThresholdLevel(heapUsedPct);
+  if (nextLevel !== runtimeStats.thresholdLevel) {
+    if (nextLevel === 'warn70') runtimeStats.thresholdCrossings.warn70 += 1;
+    if (nextLevel === 'warn85') runtimeStats.thresholdCrossings.warn85 += 1;
+    if (nextLevel === 'critical95') runtimeStats.thresholdCrossings.critical95 += 1;
+  }
+  runtimeStats.thresholdLevel = nextLevel;
+}
+
+ensureGcObserver();
+sampleRuntimeMemory();
+const memorySampler = setInterval(() => {
+  sampleRuntimeMemory();
+}, MEMORY_SAMPLE_INTERVAL_MS);
+memorySampler.unref();
 
 function clampMetric(value: unknown): number {
   return Math.max(0, Number(value) || 0);
@@ -233,11 +358,40 @@ export function recordExecutionSubmitLatency(durationMs: number): void {
 }
 
 export function getRuntimeCountersSnapshot(): RuntimeCountersSnapshot {
+  sampleRuntimeMemory();
+
   return {
     dashboard: { ...counters.dashboard },
     orderRouter: { ...counters.orderRouter },
     whaleIngestion: { ...counters.whaleIngestion },
     execution: { ...counters.execution },
+    runtime: {
+      memory: {
+        rssBytes: runtimeStats.rssBytes,
+        heapUsedBytes: runtimeStats.heapUsedBytes,
+        heapTotalBytes: runtimeStats.heapTotalBytes,
+        externalBytes: runtimeStats.externalBytes,
+        arrayBuffersBytes: runtimeStats.arrayBuffersBytes,
+        heapLimitBytes: runtimeStats.heapLimitBytes,
+        heapUsedPct: runtimeStats.heapUsedPct,
+        peakHeapUsedBytes: runtimeStats.peakHeapUsedBytes,
+        peakRssBytes: runtimeStats.peakRssBytes,
+        sampleCount: runtimeStats.sampleCount,
+        lastSampleAtMs: runtimeStats.lastSampleAtMs,
+        thresholdLevel: runtimeStats.thresholdLevel,
+        thresholdCrossings: {
+          warn70: runtimeStats.thresholdCrossings.warn70,
+          warn85: runtimeStats.thresholdCrossings.warn85,
+          critical95: runtimeStats.thresholdCrossings.critical95,
+        },
+        gc: {
+          eventCount: runtimeStats.gc.eventCount,
+          totalDurationMs: runtimeStats.gc.totalDurationMs,
+          avgDurationMs: runtimeStats.gc.avgDurationMs,
+          maxDurationMs: runtimeStats.gc.maxDurationMs,
+        },
+      },
+    },
   };
 }
 
@@ -331,4 +485,26 @@ export function resetRuntimeCounters(): void {
   executionStats.submitLatencyTotalMs = 0;
   executionStats.submitLatencySamples = 0;
   executionStats.submitLatencyRolling = [];
+
+  runtimeStats.rssBytes = 0;
+  runtimeStats.heapUsedBytes = 0;
+  runtimeStats.heapTotalBytes = 0;
+  runtimeStats.externalBytes = 0;
+  runtimeStats.arrayBuffersBytes = 0;
+  runtimeStats.heapLimitBytes = 0;
+  runtimeStats.heapUsedPct = 0;
+  runtimeStats.peakHeapUsedBytes = 0;
+  runtimeStats.peakRssBytes = 0;
+  runtimeStats.sampleCount = 0;
+  runtimeStats.lastSampleAtMs = 0;
+  runtimeStats.thresholdLevel = 'ok';
+  runtimeStats.thresholdCrossings.warn70 = 0;
+  runtimeStats.thresholdCrossings.warn85 = 0;
+  runtimeStats.thresholdCrossings.critical95 = 0;
+  runtimeStats.gc.eventCount = 0;
+  runtimeStats.gc.totalDurationMs = 0;
+  runtimeStats.gc.avgDurationMs = 0;
+  runtimeStats.gc.maxDurationMs = 0;
+
+  sampleRuntimeMemory();
 }

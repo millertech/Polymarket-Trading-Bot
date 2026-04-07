@@ -1,6 +1,6 @@
 # Polymarket Trading Bot Improvement Plan
 
-Last updated: 2026-04-06
+Last updated: 2026-04-07
 Mode for implementation/testing: PAPER trading only (no live credentials)
 
 ## 1. Executive Goals
@@ -83,6 +83,9 @@ Overall progress estimate: 95%
   - Added optional CORS origin control via env var.
 - Additional flow quality improvements:
 - [x] Make ingestion auth breaker thresholds runtime-configurable per instance for deterministic tests.
+  - Added runtime memory telemetry in `/api/system/counters` (heap used/limit %, RSS/external, in-process peaks, threshold levels, GC pause stats).
+  - Added bounded-retention cleanup for long-lived dedupe maps in order routing and whale ingestion to prevent unbounded key growth.
+  - Made wallet trade history cap configurable via `WALLET_MAX_TRADE_HISTORY` and enforced cap during runtime rehydration.
   - Added duplicate risk-rejection log throttling per wallet+reason in order routing.
   - Added ingestion auth circuit breaker for repeated 401/403 responses with configurable cooldown.
   - Added runtime persistence tests for snapshot and kill-switch state load/save/clear paths.
@@ -131,7 +134,7 @@ Changed files relevant to this plan:
 
 ### Current findings after full validation run
 - Build: PASS (`npm run build`)
-- Tests: PASS (`npm test`) with 163 tests passing.
+- Tests: PASS (`npm test`) with 164 tests passing.
 - Runtime paper-mode flow: PASS for engine/dashboard data flow.
 - Hardening behavior validated:
   - `/api/data` and `/api/wallets` return 200 in paper mode.
@@ -150,6 +153,9 @@ Changed files relevant to this plan:
   - Strategy catalog definitions extracted into `dashboard_strategy_catalog.ts` to keep dashboard routing/service code focused.
   - Request JSON body parsing moved into `dashboard_http.ts` to consolidate dashboard HTTP utility behavior.
   - Dashboard HTML/JS payload extracted into `dashboard_template.ts` to separate UI payload from server routing code.
+  - Runtime counters now include memory pressure telemetry with threshold crossings and GC duration stats for OOM early warning.
+  - Risk dedupe and ingestion error-dedupe state maps now prune stale keys and enforce max key caps.
+  - Wallet runtime rehydration now trims restored trades to configured in-memory retention cap.
 
 ### Remaining issues observed in logs
 - High-volume repetitive risk warnings when strategies keep proposing orders after limits are reached:
@@ -159,13 +165,19 @@ Changed files relevant to this plan:
 - This is correct risk behavior but noisy and can obscure actionable events.
 - Repetitive CLOB 401/403 ingestion failures can still occur under scanner workloads, but are now window-throttled and emitted at lower severity.
 - With auth circuit breaker in place, repeated unauthorized bursts are now bounded by cooldown instead of continuously hammering endpoints.
+- LIVE runtime memory pressure incident observed (OOM crash):
+  - V8 old-space near heap limit (`~1.79-1.81 GB` after mark-compact)
+  - repeated long GC pauses (`~5.8-5.9s`) with low mutator utilization
+  - fatal exit: `Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory`
+  - incident occurred during live order submission flow, indicating memory growth under sustained runtime rather than startup-only burst.
 
 ## 7. Next Steps (Immediate)
 
-1. Begin Phase 2 data quality work: order/fill latency timestamps and timeout tracker for execution flow.
-2. Add explicit signal->route->submit->fill timestamps to persisted trade/execution records for per-order latency reconstruction.
-3. Extend dashboard execution health with persisted multi-window percentile baselines (beyond single-refresh deltas).
-4. Add focused tests for graceful startup/shutdown rehydration behavior through CLI integration path.
+1. Prioritize memory-stability work before additional feature expansion (see Section 10).
+2. Add runtime memory telemetry and alerting (heap used, RSS, external, GC pause, high-water marks) to counters and dashboard.
+3. Bound or prune long-lived in-memory collections (logs/caches/trade arrays/maps) with explicit retention limits.
+4. Run targeted heap profiling during live-like burn-in and identify top retained objects by growth slope.
+5. After memory baseline is stable, resume Phase 2 data quality work.
 
 ## 8. PAPER Mode Test Protocol
 
@@ -185,3 +197,35 @@ Changed files relevant to this plan:
 4. [x] Split dashboard server into smaller modules (routing/middleware/api/template/client script) to reduce monolith risk.
   - Progress: extracted HTTP/rate-limiter/body-parser primitives into `src/reporting/dashboard_http.ts`, wallet detail analytics into `src/reporting/dashboard_wallet_detail.ts`, strategy catalog into `src/reporting/dashboard_strategy_catalog.ts`, HTML/JS payload into `src/reporting/dashboard_template.ts`, and completed route delegation via `src/reporting/dashboard_core_routes.ts`, `src/reporting/dashboard_wallet_routes.ts`, `src/reporting/dashboard_strategy_routes.ts`, `src/reporting/dashboard_trade_routes.ts`, and `src/reporting/dashboard_operational_routes.ts`.
 5. [x] Remove or migrate duplicate `.js` tests now that Vitest only includes `.test.ts` files.
+
+## 10. Memory Stability Plan (NEW)
+
+### 10.1 Incident Summary
+- A production-like LIVE run aborted with V8 OOM after sustained operation.
+- GC behavior indicates old-space saturation and ineffective compaction, consistent with retained-object growth (leak or unbounded retention).
+
+### 10.2 Primary Risk Areas to Investigate
+1. Unbounded in-memory collections (runtime logs, per-wallet trade arrays, map-based caches, suppression trackers).
+2. Request/stream payload fan-out paths that materialize large arrays repeatedly (e.g., all-trades payloads and high-frequency SSE broadcast).
+3. Long-lived scanner/ingestion caches that may not prune stale keys aggressively.
+
+### 10.3 Implementation Track
+1. Add memory observability:
+  - periodic snapshots of `process.memoryUsage()` and `v8.getHeapStatistics()` into runtime counters.
+  - peak trackers and warning thresholds (70% / 85% / 95% of heap limit).
+  - dashboard/system endpoint visibility for live memory trend.
+2. Add bounded-retention controls:
+  - explicit max-entry caps for in-memory logs/caches/maps.
+  - TTL-based cleanup for stale keys in scanner/ingestion state maps.
+  - optional trade-history retention window in memory with persisted backing for long history.
+3. Reduce high-allocation response paths:
+  - add paging/limit parameters for heavy list endpoints (especially all-trades).
+  - avoid full-array rebuilds when incremental updates are sufficient.
+4. Add operational safeguards:
+  - conservative process memory limit configuration and supervised restart policy.
+  - pre-OOM diagnostic dump/heap snapshot trigger when threshold is crossed.
+
+### 10.4 Validation Gates
+1. 6-hour paper/live-like soak: no monotonic heap growth trend beyond configured envelope.
+2. 24-hour soak: no OOM, no repeated multi-second GC pause clusters.
+3. Endpoint correctness and dashboard behavior unchanged under retention caps (covered by regression tests).

@@ -279,7 +279,3 @@ export class DashboardServer {
     json(res, 404, { error: 'Not found' });
   }
 }
-
-/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   Full HTML Dashboard — three-tab SPA
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */

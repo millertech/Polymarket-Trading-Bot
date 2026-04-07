@@ -18,7 +18,11 @@ import {
 
 export class OrderRouter {
   private readonly riskLogWindowMs = Number(process.env.RISK_LOG_DEDUPE_WINDOW_MS ?? '5000');
+  private readonly riskLogRetentionMs = Number(process.env.RISK_LOG_DEDUPE_RETENTION_MS ?? '300000');
+  private readonly maxRiskLogKeys = Number(process.env.RISK_LOG_DEDUPE_MAX_KEYS ?? '5000');
+  private readonly riskLogCleanupIntervalMs = Number(process.env.RISK_LOG_DEDUPE_CLEANUP_INTERVAL_MS ?? '30000');
   private readonly riskLogState = new Map<string, { lastLoggedAt: number; suppressed: number }>();
+  private lastRiskLogCleanupAt = 0;
 
   constructor(
     private readonly walletManager: WalletManager,
@@ -27,6 +31,8 @@ export class OrderRouter {
   ) {}
 
   async route(order: OrderRequest): Promise<boolean> {
+    this.cleanupRiskLogState(Date.now());
+
     const routeStartedAt = Date.now();
     recordExecutionRouteAttempt();
 
@@ -95,6 +101,28 @@ export class OrderRouter {
       throw error;
     } finally {
       recordExecutionRouteLatency(Date.now() - routeStartedAt);
+    }
+  }
+
+  private cleanupRiskLogState(now: number): void {
+    if (now - this.lastRiskLogCleanupAt < this.riskLogCleanupIntervalMs) return;
+    this.lastRiskLogCleanupAt = now;
+
+    for (const [key, value] of this.riskLogState.entries()) {
+      if (now - value.lastLoggedAt > this.riskLogRetentionMs) {
+        this.riskLogState.delete(key);
+      }
+    }
+
+    if (this.riskLogState.size <= this.maxRiskLogKeys) return;
+
+    const entriesByAge = Array.from(this.riskLogState.entries())
+      .sort((a, b) => a[1].lastLoggedAt - b[1].lastLoggedAt);
+    const toDelete = this.riskLogState.size - this.maxRiskLogKeys;
+    for (let i = 0; i < toDelete; i += 1) {
+      const entry = entriesByAge[i];
+      if (!entry) break;
+      this.riskLogState.delete(entry[0]);
     }
   }
 }
