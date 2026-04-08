@@ -85,6 +85,7 @@ Overall progress estimate: 95%
 - [x] Make ingestion auth breaker thresholds runtime-configurable per instance for deterministic tests.
   - Added runtime memory telemetry in `/api/system/counters` (heap used/limit %, RSS/external, in-process peaks, threshold levels, GC pause stats).
   - Added bounded-retention cleanup for long-lived dedupe maps in order routing and whale ingestion to prevent unbounded key growth.
+  - Added bounded-retention cleanup for scanner `crossReferencedAddresses` and `walletBalances` caches, including normalized lower-case wallet keys to prevent duplicate-case cache growth.
   - Made wallet trade history cap configurable via `WALLET_MAX_TRADE_HISTORY` and enforced cap during runtime rehydration.
   - Added bounded trade endpoint paging (`limit`/`offset`) and switched dashboard trade-log polling to capped fetches to reduce `/api/trades/all` memory spikes.
   - Added duplicate risk-rejection log throttling per wallet+reason in order routing.
@@ -156,6 +157,7 @@ Changed files relevant to this plan:
   - Dashboard HTML/JS payload extracted into `dashboard_template.ts` to separate UI payload from server routing code.
   - Runtime counters now include memory pressure telemetry with threshold crossings and GC duration stats for OOM early warning.
   - Risk dedupe and ingestion error-dedupe state maps now prune stale keys and enforce max key caps.
+  - Scanner cross-reference and wallet-balance caches now enforce max-entry caps, reducing long-session retained-set/map growth risk.
   - Wallet runtime rehydration now trims restored trades to configured in-memory retention cap.
   - `/api/trades/all` now avoids unbounded response construction by maintaining a bounded recent-trade window during aggregation.
 

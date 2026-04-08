@@ -408,6 +408,8 @@ export class WhaleScanner {
   private static readonly MAX_BIG_TRADE_ADDRESSES = 10_000;
   private static readonly MAX_COPY_SIM_RESULTS = 5_000;
   private static readonly MAX_TOP_PROFILES_FOR_NETWORK = 300;
+  private static readonly MAX_CROSS_REFERENCED_ADDRESSES = 20_000;
+  private static readonly MAX_WALLET_BALANCES = 10_000;
 
   private db: WhaleDB;
   private config: WhaleTrackingConfig;
@@ -1017,6 +1019,26 @@ export class WhaleScanner {
       }
     }
 
+    // crossReferencedAddresses: keep most recent addresses to bound continuous growth
+    if (this.crossReferencedAddresses.size > WhaleScanner.MAX_CROSS_REFERENCED_ADDRESSES) {
+      const excess = this.crossReferencedAddresses.size - WhaleScanner.MAX_CROSS_REFERENCED_ADDRESSES;
+      const iter = this.crossReferencedAddresses.values();
+      for (let i = 0; i < excess; i++) {
+        const key = iter.next().value;
+        if (key !== undefined) this.crossReferencedAddresses.delete(key);
+      }
+    }
+
+    // walletBalances: keep most recently updated balances only
+    if (this.walletBalances.size > WhaleScanner.MAX_WALLET_BALANCES) {
+      const excess = this.walletBalances.size - WhaleScanner.MAX_WALLET_BALANCES;
+      const iter = this.walletBalances.keys();
+      for (let i = 0; i < excess; i++) {
+        const key = iter.next().value;
+        if (key !== undefined) this.walletBalances.delete(key);
+      }
+    }
+
     // requestTimestamps: keep only last 60s
     const cutoff = Date.now() - 60_000;
     this.requestTimestamps = this.requestTimestamps.filter((t) => t >= cutoff);
@@ -1431,7 +1453,7 @@ export class WhaleScanner {
         alreadyCandidate: candidateAddrs.has(addr),
         suggestedTags,
         marketBreakdown: marketBreakdown.sort((a, b) => b.volumeUsd - a.volumeUsd),
-        crossReferenced: this.crossReferencedAddresses.has(addr),
+        crossReferenced: this.crossReferencedAddresses.has(addr.toLowerCase()),
         clusterMarketIds: [],  // filled in by detectClusters()
       });
     }
@@ -1687,7 +1709,7 @@ export class WhaleScanner {
   private async crossReferenceTopWhales(): Promise<void> {
     const maxCrossRef = this.scannerConfig.crossRefMaxPerBatch;
     const topProfiles = this.latestProfiles
-      .filter((p) => !this.crossReferencedAddresses.has(p.address) && p.compositeScore >= 50)
+      .filter((p) => !this.crossReferencedAddresses.has(p.address.toLowerCase()) && p.compositeScore >= 50)
       .slice(0, maxCrossRef);
 
     if (topProfiles.length === 0) return;
@@ -1754,7 +1776,7 @@ export class WhaleScanner {
           this.aggregateTrades(this.globalAgg, trades, mktId, `Market ${mktId.slice(0, 8)}…`);
         }
 
-        this.crossReferencedAddresses.add(profile.address);
+        this.crossReferencedAddresses.add(profile.address.toLowerCase());
         logger.debug({
           address: profile.address.slice(0, 10) + '…',
           newMarkets: marketTrades.size,
@@ -2661,7 +2683,10 @@ export class WhaleScanner {
             /* USDC on Polygon has 6 decimals */
             const raw = BigInt(json.result);
             const balance = Number(raw) / 1_000_000;
-            this.walletBalances.set(whale.address, balance);
+            const walletKey = whale.address.toLowerCase();
+            // Keep insertion order fresh so pruning evicts the oldest unseen wallets first.
+            if (this.walletBalances.has(walletKey)) this.walletBalances.delete(walletKey);
+            this.walletBalances.set(walletKey, balance);
           }
         }
       } catch {

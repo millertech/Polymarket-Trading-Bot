@@ -44,6 +44,8 @@
 - Dedupe/suppression maps that key by dynamic values must include TTL cleanup and max-size caps, otherwise memory grows slowly but unbounded over long live sessions.
 - Trade history retention should be enforced during rehydration, not only during append, to prevent snapshot restore from reintroducing oversized in-memory arrays.
 - Heavy dashboard endpoints should bound both serialization output and intermediate aggregation structures; limiting only the final response is not enough to prevent peak heap spikes.
+- Scanner-side long-lived `Set`/`Map` caches also need explicit caps in continuous mode; relying only on full-sweep resets is insufficient for sustained runtimes.
+- Normalizing wallet addresses to lower-case at insertion and lookup avoids duplicate-case cache growth and ensures consistent hit rates for enrichment fields.
 
 ## Design Choices
 - Added `runtime_wallet_snapshot` table for one-row latest snapshot storage.
@@ -84,6 +86,7 @@
   - `tests/dashboard_server_hardening.test.ts` remains green after extracting strategy/copy-trade route handlers into `dashboard_strategy_routes.ts`.
   - `tests/dashboard_server_hardening.test.ts` remains green after extracting trade routes and operational routes into dedicated handler modules.
   - `tests/dashboard_server_hardening.test.ts` remains green after extracting core dashboard routes into `dashboard_core_routes.ts`.
+  - `tests/whale_scanner.test.ts` remains green after adding scanner memory caps for cross-reference and wallet-balance caches.
 - Added tests for persistence and reliability:
   - runtime SQLite snapshot persistence/load/clear
   - kill-switch state persistence/load
