@@ -86,6 +86,10 @@ Overall progress estimate: 95%
   - Added runtime memory telemetry in `/api/system/counters` (heap used/limit %, RSS/external, in-process peaks, threshold levels, GC pause stats).
   - Added bounded-retention cleanup for long-lived dedupe maps in order routing and whale ingestion to prevent unbounded key growth.
   - Added bounded-retention cleanup for scanner `crossReferencedAddresses` and `walletBalances` caches, including normalized lower-case wallet keys to prevent duplicate-case cache growth.
+  - Added LIVE CLOB error sanitization/truncation to avoid retaining/logging oversized nested error objects during repeated order failures.
+  - Added bounded `marketTokenCache` retention in LIVE wallet token resolution to prevent unbounded market-id cache growth.
+  - Added console-log per-entry payload truncation so in-memory dashboard log ring cannot retain very large structured error objects.
+  - Added scanner high-memory guard (`SCANNER_HIGH_MEMORY_UTILIZATION_PCT`) to skip cross-reference/cluster heavy phases for a batch when heap pressure is elevated.
   - Made wallet trade history cap configurable via `WALLET_MAX_TRADE_HISTORY` and enforced cap during runtime rehydration.
   - Added bounded trade endpoint paging (`limit`/`offset`) and switched dashboard trade-log polling to capped fetches to reduce `/api/trades/all` memory spikes.
   - Added duplicate risk-rejection log throttling per wallet+reason in order routing.

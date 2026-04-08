@@ -21,6 +21,14 @@ export class PolymarketWallet {
     100,
     Number(process.env.WALLET_MAX_TRADE_HISTORY ?? '10000'),
   );
+  private static readonly MAX_MARKET_TOKEN_CACHE = Math.max(
+    200,
+    Number(process.env.POLYMARKET_MARKET_TOKEN_CACHE_MAX ?? '2000'),
+  );
+  private static readonly MAX_ERROR_TEXT_LENGTH = Math.max(
+    256,
+    Number(process.env.POLYMARKET_ERROR_TEXT_MAX_CHARS ?? '1200'),
+  );
   private static readonly MIN_MARKETABLE_BUY_NOTIONAL_USD = 1;
   private static hasLoggedL2Credentials = false;
   private state: WalletState;
@@ -275,7 +283,7 @@ export class PolymarketWallet {
         side: request.side === 'BUY' ? Side.BUY : Side.SELL,
       });
     } catch (err) {
-      let details = this.stringifyUnknown(err);
+      let details = this.sanitizeOrderError(err);
 
       // If env L2 creds are stale, force one retry with fresh derived creds.
       if (this.isInvalidSignatureError(details) && this.activeCredSource === 'provided') {
@@ -300,7 +308,7 @@ export class PolymarketWallet {
             side: request.side === 'BUY' ? Side.BUY : Side.SELL,
           });
         } catch (retryErr) {
-          details = this.stringifyUnknown(retryErr);
+          details = this.sanitizeOrderError(retryErr);
         }
       }
 
@@ -332,7 +340,7 @@ export class PolymarketWallet {
           orderId,
           credSource: this.activeCredSource,
           tokenId,
-          error: details,
+          errorSummary: details,
         }, msg);
         consoleLog.error('ORDER', `[${this.state.walletId}] ${msg}`);
         if (this.isTradingRestrictedError(details)) {
@@ -392,7 +400,7 @@ export class PolymarketWallet {
         size: normalizedSize,
         realizedPnl,
         balance: this.state.availableBalance,
-        clobResponse: orderResponse,
+        clobAccepted: orderResponse != null,
       },
       `LIVE order FILLED ${request.side} ${request.outcome} market=${request.marketId} price=${normalizedPrice} size=${normalizedSize}`,
     );
@@ -665,6 +673,70 @@ export class PolymarketWallet {
     }
   }
 
+  private truncateText(value: string, maxLength = PolymarketWallet.MAX_ERROR_TEXT_LENGTH): string {
+    if (value.length <= maxLength) return value;
+    return `${value.slice(0, maxLength)}...<truncated ${value.length - maxLength} chars>`;
+  }
+
+  private sanitizeOrderError(value: unknown): string {
+    if (value instanceof Error) {
+      return this.truncateText(value.message || 'Unknown error');
+    }
+
+    if (typeof value === 'string') {
+      return this.truncateText(value);
+    }
+
+    if (value && typeof value === 'object') {
+      const obj = value as Record<string, unknown>;
+      const status = typeof obj.status === 'number' ? obj.status : undefined;
+      const statusText = typeof obj.statusText === 'string' ? obj.statusText : undefined;
+
+      let detail: string | undefined;
+      const data = obj.data;
+      if (data && typeof data === 'object') {
+        const dataObj = data as Record<string, unknown>;
+        if (typeof dataObj.error === 'string') detail = dataObj.error;
+        else if (typeof dataObj.message === 'string') detail = dataObj.message;
+      }
+
+      if (!detail && typeof obj.error === 'string') {
+        detail = obj.error;
+      }
+
+      if (!detail && typeof obj.message === 'string') {
+        detail = obj.message;
+      }
+
+      const parts = [
+        status !== undefined ? `status=${status}` : null,
+        statusText ? `statusText=${statusText}` : null,
+        detail ? `detail=${detail}` : null,
+      ].filter((p): p is string => Boolean(p));
+
+      if (parts.length > 0) {
+        return this.truncateText(parts.join(' | '));
+      }
+    }
+
+    return this.truncateText(this.stringifyUnknown(value));
+  }
+
+  private setMarketTokenCache(marketId: string, tokenIds: string[]): void {
+    if (!marketId || tokenIds.length === 0) return;
+    if (this.marketTokenCache.has(marketId)) this.marketTokenCache.delete(marketId);
+    this.marketTokenCache.set(marketId, tokenIds);
+
+    if (this.marketTokenCache.size > PolymarketWallet.MAX_MARKET_TOKEN_CACHE) {
+      const excess = this.marketTokenCache.size - PolymarketWallet.MAX_MARKET_TOKEN_CACHE;
+      const iter = this.marketTokenCache.keys();
+      for (let i = 0; i < excess; i++) {
+        const key = iter.next().value;
+        if (key !== undefined) this.marketTokenCache.delete(key);
+      }
+    }
+  }
+
   private async resolveOrderTokenId(
     request: { marketId: string; tokenId?: string; outcome: 'YES' | 'NO' },
     forceRefresh = false,
@@ -682,7 +754,7 @@ export class PolymarketWallet {
     let tokenIds = !forceRefresh ? this.marketTokenCache.get(marketId) : undefined;
     if (!tokenIds || tokenIds.length === 0) {
       tokenIds = await this.fetchGammaTokenIds(marketId);
-      if (tokenIds.length > 0) this.marketTokenCache.set(marketId, tokenIds);
+      if (tokenIds.length > 0) this.setMarketTokenCache(marketId, tokenIds);
     }
 
     if (!tokenIds || tokenIds.length === 0) {
@@ -762,7 +834,7 @@ export class PolymarketWallet {
 
     // Some clob-client versions return `{ error, status }` instead of throwing.
     if (!this.isClobOrderAccepted(response)) {
-      const detail = this.stringifyUnknown(response);
+      const detail = this.sanitizeOrderError(response);
       throw new Error(`CLOB rejected order: ${detail}`);
     }
 

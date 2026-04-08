@@ -118,6 +118,10 @@ const SCANNER_MARKETS_JSON_MAX_BYTES = Number(ENV.SCANNER_MARKETS_JSON_MAX_BYTES
 const SCANNER_TRADES_JSON_MAX_BYTES = Number(ENV.SCANNER_TRADES_JSON_MAX_BYTES ?? '16777216');
 const SCANNER_SMALL_JSON_MAX_BYTES = Number(ENV.SCANNER_SMALL_JSON_MAX_BYTES ?? '1048576');
 const MAX_TRADES_PER_SIDE_PER_MARKET = Number(ENV.SCANNER_MAX_TRADES_PER_SIDE_PER_MARKET ?? '600');
+const SCANNER_HIGH_MEMORY_UTILIZATION_PCT = Math.min(
+  0.98,
+  Math.max(0.5, Number(ENV.SCANNER_HIGH_MEMORY_UTILIZATION_PCT ?? '0.88')),
+);
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    Semaphore — limits concurrent async operations to N at a time.
@@ -891,14 +895,26 @@ export class WhaleScanner {
       /* ── Big-trade spike detection ── */
       this.detectBigTrades();
 
+      const skipHeavyScannerPhases = this.isMemoryPressureHigh();
+      if (skipHeavyScannerPhases) {
+        this.pruneMemory();
+        logger.warn(
+          {
+            batch: this.state.batchNumber,
+            thresholdPct: SCANNER_HIGH_MEMORY_UTILIZATION_PCT,
+          },
+          'Scanner: high memory pressure detected — skipping cross-reference and cluster phases this batch',
+        );
+      }
+
       /* ── Cross-referencing: deep-scan top whales across all markets ── */
-      if (this.scannerConfig.crossRefEnabled) {
+      if (this.scannerConfig.crossRefEnabled && !skipHeavyScannerPhases) {
         await this.crossReferenceTopWhales();
         this.rebuildProfiles();
       }
 
       /* ── Whale cluster detection ── */
-      if (this.scannerConfig.clusterDetectionEnabled) {
+      if (this.scannerConfig.clusterDetectionEnabled && !skipHeavyScannerPhases) {
         this.detectClusters();
         this.generateClusterSignals();
       }
@@ -979,6 +995,13 @@ export class WhaleScanner {
     this.state.qualifiedCount = profiles.filter(
       (p) => p.compositeScore >= this.scannerConfig.autoPromoteMinScore,
     ).length;
+  }
+
+  private isMemoryPressureHigh(): boolean {
+    const mem = process.memoryUsage();
+    const heapTotal = mem.heapTotal;
+    if (heapTotal <= 0) return false;
+    return (mem.heapUsed / heapTotal) >= SCANNER_HIGH_MEMORY_UTILIZATION_PCT;
   }
 
   /** Evict oldest entries from unbounded in-memory structures to prevent OOM */

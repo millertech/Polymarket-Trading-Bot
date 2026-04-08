@@ -52,11 +52,33 @@ export interface ConsoleEntry {
 }
 
 const MAX_ENTRIES = 2000;
+const MAX_ENTRY_DATA_CHARS = Math.max(
+  256,
+  Number(process.env.CONSOLE_LOG_MAX_ENTRY_DATA_CHARS ?? '4000'),
+);
 
 class ConsoleLogSingleton extends EventEmitter {
   private readonly buffer: ConsoleEntry[] = [];
   private seq = 0;
   private readonly sseClients = new Set<http.ServerResponse>();
+
+  private sanitizeData(data?: Record<string, unknown>): Record<string, unknown> | undefined {
+    if (!data) return undefined;
+    try {
+      const serialized = JSON.stringify(data);
+      if (serialized.length <= MAX_ENTRY_DATA_CHARS) return data;
+      return {
+        truncated: true,
+        originalChars: serialized.length,
+        preview: `${serialized.slice(0, MAX_ENTRY_DATA_CHARS)}...<truncated>`,
+      };
+    } catch {
+      return {
+        truncated: true,
+        reason: 'data-serialization-failed',
+      };
+    }
+  }
 
   /* ── Public API ─────────────────────────────────────────────── */
 
@@ -72,7 +94,7 @@ class ConsoleLogSingleton extends EventEmitter {
       level,
       category,
       message,
-      data,
+      data: this.sanitizeData(data),
     };
 
     // Ring buffer

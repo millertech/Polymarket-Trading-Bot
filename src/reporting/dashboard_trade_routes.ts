@@ -185,16 +185,34 @@ export function handleDashboardTradeRoutes(
     }
 
     const totalTrades = trades.length;
-    const buys = trades.filter((t) => t.side === 'BUY').length;
-    const sells = trades.filter((t) => t.side === 'SELL').length;
+    let buys = 0;
+    let sells = 0;
+    let winningTrades = 0;
+    let losingTrades = 0;
+    let totalVolume = 0;
+    let bestTrade = 0;
+    let worstTrade = 0;
+    let seenTrade = false;
+
+    for (const t of trades) {
+      if (t.side === 'BUY') buys += 1;
+      if (t.side === 'SELL') sells += 1;
+      if (t.realizedPnl > 0) winningTrades += 1;
+      if (t.realizedPnl < 0) losingTrades += 1;
+      totalVolume += t.cost;
+      if (!seenTrade) {
+        bestTrade = t.realizedPnl;
+        worstTrade = t.realizedPnl;
+        seenTrade = true;
+      } else {
+        if (t.realizedPnl > bestTrade) bestTrade = t.realizedPnl;
+        if (t.realizedPnl < worstTrade) worstTrade = t.realizedPnl;
+      }
+    }
+
     const totalPnl = walletState.realizedPnl;
-    const winningTrades = trades.filter((t) => t.realizedPnl > 0).length;
-    const losingTrades = trades.filter((t) => t.realizedPnl < 0).length;
     const winRate = sells > 0 ? winningTrades / sells : 0;
-    const totalVolume = trades.reduce((s, t) => s + t.cost, 0);
     const avgTradeSize = totalTrades > 0 ? totalVolume / totalTrades : 0;
-    const bestTrade = trades.reduce((best, t) => (t.realizedPnl > best ? t.realizedPnl : best), 0);
-    const worstTrade = trades.reduce((worst, t) => (t.realizedPnl < worst ? t.realizedPnl : worst), 0);
     const end = Math.max(0, trades.length - offset);
     const start = Math.max(0, end - limit);
     const pagedTrades = trades.slice(start, end);

@@ -46,6 +46,9 @@
 - Heavy dashboard endpoints should bound both serialization output and intermediate aggregation structures; limiting only the final response is not enough to prevent peak heap spikes.
 - Scanner-side long-lived `Set`/`Map` caches also need explicit caps in continuous mode; relying only on full-sweep resets is insufficient for sustained runtimes.
 - Normalizing wallet addresses to lower-case at insertion and lookup avoids duplicate-case cache growth and ensures consistent hit rates for enrichment fields.
+- LIVE CLOB failures can include very large nested error/config payloads; logging full objects increases memory churn and can leak sensitive fields, so error summaries should be sanitized and length-capped.
+- In-memory dashboard log buffers should cap per-entry structured payload size, not only entry count, to prevent a few oversized error objects from dominating retained memory.
+- On low-memory hosts, scanner should degrade gracefully under heap pressure by skipping optional heavy phases (cross-reference/cluster graph generation) for that cycle instead of risking process OOM.
 
 ## Design Choices
 - Added `runtime_wallet_snapshot` table for one-row latest snapshot storage.
@@ -87,6 +90,8 @@
   - `tests/dashboard_server_hardening.test.ts` remains green after extracting trade routes and operational routes into dedicated handler modules.
   - `tests/dashboard_server_hardening.test.ts` remains green after extracting core dashboard routes into `dashboard_core_routes.ts`.
   - `tests/whale_scanner.test.ts` remains green after adding scanner memory caps for cross-reference and wallet-balance caches.
+  - `npm run -s build` and `tests/wallet_manager.test.ts`, `tests/dashboard_server_hardening.test.ts`, `tests/whale_scanner.test.ts` remain green after adding LIVE order error sanitization and console-log payload truncation caps.
+  - `npm run -s build` and `tests/whale_scanner.test.ts`, `tests/wallet_manager.test.ts`, `tests/dashboard_server_hardening.test.ts` remain green after adding scanner high-memory phase-shedding guard.
 - Added tests for persistence and reliability:
   - runtime SQLite snapshot persistence/load/clear
   - kill-switch state persistence/load
