@@ -222,6 +222,10 @@ program
       void runtimeDb.saveKillSwitchState(enabled).catch((error) => {
         logger.warn({ err: String(error), enabled }, 'Failed to persist kill-switch state');
       });
+      runtimeDb.appendAuditEvent({
+        event_type: enabled ? 'kill_switch_on' : 'kill_switch_off',
+        actor: 'system',
+      });
     });
 
     const clearRuntimeOnStart = shouldClearWalletRuntimeOnStart(config.environment.enableLiveTrading);
@@ -302,6 +306,7 @@ program
     }
 
     dashboardServer.start();
+    dashboardServer.setDatabase(runtimeDb);
     const riskEngine = new RiskEngine(killSwitch);
     const orderRouter = new OrderRouter(walletManager, riskEngine, new TradeExecutor());
 
@@ -310,16 +315,37 @@ program
     dashboardServer.setEngine(engine);
     engine.start();
 
+    // Wire kill-switch → emergency close: when the kill switch activates, attempt
+    // to close all open positions immediately.  Runs asynchronously so it does not
+    // block the caller (e.g. the dashboard POST handler).
+    killSwitch.onChange((enabled) => {
+      if (!enabled) return;
+      void engine.closeAllPositions('kill-switch activated').then(({ attempted, succeeded }) => {
+        runtimeDb.appendAuditEvent({
+          event_type: 'emergency_close',
+          actor: 'kill_switch',
+          details: { attempted, succeeded, reason: 'kill-switch activated' },
+        });
+      }).catch((err) => {
+        logger.error({ err: String(err) }, 'Emergency closeAllPositions threw unexpectedly');
+      });
+    });
+
     let snapshotPersistInFlight = false;
     let shutdownInProgress = false;
 
     const persistRuntimeState = async (context: 'interval' | 'shutdown', signal?: string): Promise<void> => {
       const snapshot = walletManager.createRuntimeSnapshot();
       saveWalletSnapshot(walletManager);
+      const walletStates = walletManager.listWallets();
       await Promise.all([
         runtimeDb.saveRuntimeSnapshot(snapshot),
         runtimeDb.saveExecutionCountersState(exportRuntimeCountersState()),
       ]);
+      // PnL time-series snapshot — persisted on every interval write (not shutdown)
+      if (context === 'interval') {
+        runtimeDb.savePnlSnapshot(walletStates);
+      }
 
       if (context === 'shutdown') {
         logger.info(

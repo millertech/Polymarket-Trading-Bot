@@ -24,6 +24,13 @@ export class OrderRouter {
   private readonly riskLogState = new Map<string, { lastLoggedAt: number; suppressed: number }>();
   private lastRiskLogCleanupAt = 0;
 
+  /** Portfolio-level per-market exposure limit across all wallets (USD).
+   *  Override via MAX_PORTFOLIO_EXPOSURE_PER_MARKET env var. */
+  private readonly maxPortfolioExposurePerMarket = Math.max(
+    0,
+    Number(process.env.MAX_PORTFOLIO_EXPOSURE_PER_MARKET ?? '1000'),
+  );
+
   constructor(
     private readonly walletManager: WalletManager,
     private readonly riskEngine: RiskEngine,
@@ -82,6 +89,34 @@ export class OrderRouter {
       recordExecutionRouteFailure();
       recordExecutionRouteLatency(Date.now() - routeStartedAt);
       return false;
+    }
+
+    /* ── Portfolio-level per-market exposure check (cross-wallet) ── */
+    if (this.maxPortfolioExposurePerMarket > 0 && order.side === 'BUY') {
+      const portfolioExposure = this.walletManager.getTotalMarketExposure(order.marketId);
+      const orderCost = order.price * order.size;
+      if (portfolioExposure + orderCost > this.maxPortfolioExposurePerMarket) {
+        const portfolioReason = `Portfolio market exposure $${(portfolioExposure + orderCost).toFixed(2)} exceeds limit $${this.maxPortfolioExposurePerMarket}`;
+        const dedupeKey = `portfolio:${order.marketId}:${portfolioReason}`;
+        const now2 = Date.now();
+        const dedupe2 = this.riskLogState.get(dedupeKey);
+        if (!dedupe2 || now2 - dedupe2.lastLoggedAt >= this.riskLogWindowMs) {
+          consoleLog.warn('RISK', `Portfolio risk rejected: ${portfolioReason}`, {
+            marketId: order.marketId,
+            portfolioExposure,
+            orderCost,
+            limit: this.maxPortfolioExposurePerMarket,
+          });
+          this.riskLogState.set(dedupeKey, { lastLoggedAt: now2, suppressed: 0 });
+        } else {
+          dedupe2.suppressed += 1;
+          recordOrderRouterRiskSuppressed();
+        }
+        recordOrderRouterRiskRejection();
+        recordExecutionRouteFailure();
+        recordExecutionRouteLatency(Date.now() - routeStartedAt);
+        return false;
+      }
     }
 
     const submitStartedAt = Date.now();

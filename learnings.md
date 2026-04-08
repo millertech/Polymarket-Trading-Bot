@@ -60,8 +60,24 @@
 - Chose windowed dedupe (instead of dropping logs entirely) so each window still emits one representative event with a suppressed count.
 - Implemented circuit breaker as a local, in-process guard with env-configurable threshold/cooldown to keep behavior tunable without code edits.
 
+## Copy-Trade Black Box Findings (2026-04-08)
+- The copy-trade strategy's API query parameter was wrong (`maker_address` instead of `proxyWallet`). This meant every API call returned the wrong set of trades — confirmed by comparing against `whale_scanner.ts` which correctly uses `proxyWallet`.
+- `onTimer()` in CopyTradeStrategy is async (does network calls). The engine tick called it without `await`, meaning the whale trade fetch ran after `generateSignals()` in the same tick. Signals landed in `pendingSignals` and were delayed by exactly 1 tick, which is functional but adds unnecessary latency. Fixed by awaiting `onTimer()` in the engine tick.
+- `min_whale_win_rate` was a fully defined config field but was never evaluated in `passesFilters()`. The guard is now applied after a whale has at least 5 completed trades in the performance tracker (avoids filtering new whales with 0 history).
+- Market lookup in `sizePositions()` was silently dropping signals if the whale's market was not in the stream cache. The fix doesn't override this (the stream cache is the authoritative price/market source), but now logs each miss at debug level so the pattern is observable.
+- The strategy correctly initialises whale performance trackers only for addresses in `whale_addresses: []`. If the list is empty, `whalePerf` is empty and the strategy never polls — this is the operational reason no signal was ever seen. Addresses must be Polymarket proxy wallet addresses, not EOAs.
+
+## Design Choices (continued)
+- `Engine.closeAllPositions()` bypasses the risk engine deliberately: the kill switch being active makes normal risk routing reject all orders, so a direct `wallet.placeOrder()` call is the correct path for emergency exits.
+- For LIVE closeAllPositions: orders are SELL limit orders at the last stream-cached price. They may not fill immediately if liquidity is thin. The method logs each failure independently so partial closes are tracked.
+- Portfolio-level exposure check lives in `OrderRouter.route()` rather than `RiskEngine.check()` to avoid passing all wallet states into the per-order risk call. The router already has WalletManager access and calls `getTotalMarketExposure(marketId)` before submission.
+- PnL snapshots use the same 10-second persist interval as the wallet snapshot (no extra timer). They are append-only (not overwrite), which is why the table name is `pnl_snapshots` not `pnl_state`.
+- `appendAuditEvent()` is synchronous (not async) because it uses `better-sqlite3`'s synchronous API. This keeps audit writes atomic with the code path that triggers them.
+- Adding `Database` to `DashboardServer` via `setDatabase()` (not in the constructor) keeps backward compatibility with any test setups that construct `DashboardServer` directly.
+
 ## Trade-offs
 - Persistence currently stores the latest snapshot rather than a full historical timeline. This is fast and simple, but not enough for time-series analytics yet.
+- PnL snapshot rows accumulate indefinitely (no auto-prune). At 10-second intervals X many wallets, this grows ~8,640 rows per wallet per day. A table-size guard or age-based prune should be added before long-term live use.
 - Snapshot writes are periodic (10 seconds), so an abrupt crash can lose up to one interval of runtime changes.
 - Snapshot payload is JSON in SQLite for flexibility; this avoids schema churn but makes ad-hoc SQL analytics harder.
 - Current rate limiter is in-memory and per-process; restart resets counters.
@@ -143,14 +159,21 @@
 - After circuit-breaker addition, unauthorized bursts are constrained by cooldown windows, reducing repeated noisy failure loops.
 
 ## Next Technical Steps
-- Add snapshot history table for PnL time-series and post-run analytics.
-- Persist risk-engine rate-limit windows to avoid post-restart burst loopholes.
+- ~~Add snapshot history table for PnL time-series and post-run analytics.~~ DONE — `pnl_snapshots` table, written every 10s, served via `/api/pnl/history`.
 - Add DB-level startup lock to prevent dual process writers.
-- Add authenticated dashboard APIs and endpoint rate limiting before any internet-exposed deployment.
-- Add tests for dashboard rate-limit behavior and response security headers.
-- Add risk warning dedupe window by wallet + reason to reduce log spam.
-- Add ingestion circuit-breaker/backoff behavior for sustained 401/403 responses.
-- Add persistence tests covering runtime snapshot restore and kill-switch restore path.
-- Add hardening counters surfaced in API/dashboard for operational visibility (suppressed logs, rate-limit hits, breaker open/close events).
+- Add authenticated dashboard APIs and endpoint rate limiting before any internet-exposed deployment (jwt already installed).
+- Add PnL snapshot auto-pruning (age or row-count based) to prevent unbounded growth in long-running sessions.
+- Drawdown high-water mark: persist current drawdown as a `runtime_state` key (same pattern as kill-switch) so it survives restarts.
+- Copy-trade: populate `whale_addresses` in config.yaml with real Polymarket proxy wallet addresses to activate.
+- Copy-trade: if market-cache miss rate is high in logs, evaluate targeted fetch for whale trade market IDs outside the stream.
+
+## Validation Outcomes (2026-04-08 session)
+- `npm run build`: PASS
+- `npm test`: PASS (174 tests — up from 164)
+- New tests added:
+  - `tests/trade_executor.test.ts` (4 tests — call shape, error propagation, tokenId, SELL side)
+  - `tests/position_manager.test.ts` (5 tests — isolation, overwrite, empty, multi-wallet)
+  - `tests/copy_trade_strategy.test.ts` updated: `maker_address` → `proxyWallet` assertion corrected
+
 - Begin execution-latency instrumentation (signal->submit->fill) and timeout handling.
 - Add phase-2 latency counters into the same runtime counters payload to keep observability shape consistent.

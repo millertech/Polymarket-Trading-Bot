@@ -165,7 +165,7 @@ describe('CopyTradeStrategy — Polling', () => {
 
     await s.onTimer();
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toContain(`maker_address=${WHALE_A}`);
+    expect(fetchMock.mock.calls[0][0]).toContain(`proxyWallet=${WHALE_A}`);
   });
 
   it('does not poll before interval elapses', async () => {

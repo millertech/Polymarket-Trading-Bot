@@ -1,6 +1,6 @@
 # Polymarket Trading Bot Improvement Plan
 
-Last updated: 2026-04-07
+Last updated: 2026-04-08
 Mode for implementation/testing: PAPER trading only (no live credentials)
 
 ## 1. Executive Goals
@@ -66,7 +66,7 @@ Mode for implementation/testing: PAPER trading only (no live credentials)
 
 Overall progress estimate: 95%
 ## Progress
-- Overall completion: 68%
+- Overall completion: 85%
 - Phase 1 core implementation started and mostly completed:
   - Runtime snapshot save/load integration at startup/shutdown.
   - Kill-switch onChange persistence wiring.
@@ -118,13 +118,45 @@ Overall progress estimate: 95%
   - Dashboard API rate limiting now uses bounded-memory fixed-window buckets with stale-IP cleanup.
   - Runtime counter rehydration now preserves lifetime max latency semantics independently from rolling-window stats.
   - Removed duplicate legacy `.js` tests to reduce maintenance drift and keep test surface single-sourced in `.test.ts`.
+  - Removed `stripe` dependency (was never used; dead supply-chain risk, now purged).
+  - Fixed copy-trade strategy critical bugs (see Section 11):
+    - Corrected API query parameter from `maker_address` to `proxyWallet` (confirmed from whale_scanner.ts usage).
+    - Implemented `min_whale_win_rate` gate in `passesFilters()` (was defined in config but never enforced).
+    - Added debug logging when a whale signal is dropped because the market is not in the stream cache.
+    - Fixed `onTimer()` not being awaited in the engine tick — async whale trade fetches now complete before signal processing in the same tick.
+  - Added `Engine.closeAllPositions(reason)` for emergency position unwinding:
+    - Bypasses the risk engine (correct, since kill switch is active for emergency scenarios).
+    - Calls `placeOrder()` directly on each wallet for every tracked open position.
+    - Wired to `killSwitch.onChange` in cli.ts so kill-switch activation immediately triggers close attempts.
+    - Works for both PAPER and LIVE wallets; LIVE creates SELL limit orders on CLOB.
+    - Returns `{ attempted, succeeded }` counts; failed orders are logged but do not block other closes.
+  - Added `runtime_audit` table (SQLite, append-only):
+    - Captures kill_switch_on, kill_switch_off, emergency_close events with actor, details, timestamp.
+    - `Database.appendAuditEvent()` and `loadAuditEvents(limit)` methods.
+    - `GET /api/audit?limit=N` dashboard endpoint.
+  - Added `pnl_snapshots` table (time-series PnL per wallet):
+    - Written every 10-second persist interval (same timer as wallet snapshot).
+    - Stores wallet_id, balance, realized_pnl, open_positions_count, drawdown_pct, snapshot_at.
+    - `GET /api/pnl/history?wallet_id=<id>&limit=N` dashboard endpoint.
+    - Enables historical PnL chart/analysis without external tooling.
+  - Promoted portfolio-level market exposure check to `OrderRouter.route()`:
+    - `WalletManager.getTotalMarketExposure(marketId)` aggregates across all wallets.
+    - Checked in OrderRouter on every BUY before submission.
+    - Configurable via `MAX_PORTFOLIO_EXPOSURE_PER_MARKET` env var (default $1000).
+    - Rejection is dedupe-throttled and counted in risk rejection counters.
+  - Added `DashboardServer.setDatabase(db)` to pass runtime DB reference for audit/PnL endpoints.
+  - Added tests for `TradeExecutor` and `PositionManager` (both were untested black boxes on the execution hot path):
+    - `tests/trade_executor.test.ts`: 4 tests covering call shape, error propagation, tokenId forwarding, SELL side.
+    - `tests/position_manager.test.ts`: 5 tests covering isolation, overwrite, empty case, multi-wallet.
+  - Test count: 174 passing (was 164).
 
 ### In progress
 - Runtime tuning for scanner/ingestion polling noise under heavy market scans.
+- Copy-trade: whale addresses still need to be configured in config.yaml to produce signals.
 
 ### Not started
 3. Add focused tests for new counters/metrics endpoints.
-4. Begin Phase 2 data quality work: order/fill latency timestamps and timeout tracker for execution flow.
+4. Dashboard token-based auth (jwt/bcryptjs are in deps but not wired — deferred until internal-only dashboard confirmed insufficient).
 
 ## 5. Evidence of Work Completed
 
@@ -133,8 +165,16 @@ Changed files relevant to this plan:
 - src/risk/kill_switch.ts
 - src/cli.ts
 - src/reporting/dashboard_server.ts
+- src/reporting/dashboard_operational_routes.ts
+- src/execution/order_router.ts
+- src/execution/trade_executor.ts (tested)
+- src/execution/position_manager.ts (tested)
+- src/core/engine.ts
+- src/wallets/wallet_manager.ts
+- src/strategies/copy_trading/copy_trade_strategy.ts
 - config.yaml
 - learnings.md
+- package.json (stripe removed)
 
 ## 6. Current Blockers and Findings
 
@@ -237,3 +277,29 @@ Changed files relevant to this plan:
 1. 6-hour paper/live-like soak: no monotonic heap growth trend beyond configured envelope.
 2. 24-hour soak: no OOM, no repeated multi-second GC pause clusters.
 3. Endpoint correctness and dashboard behavior unchanged under retention caps (covered by regression tests).
+
+## 11. Copy-Trade Signal Investigation (NEW — 2026-04-08)
+
+### 11.1 Root Cause Analysis
+Copy-trade strategy never fired a signal despite running continuously.  Four bugs found:
+
+| Bug | Severity | Fix |
+|---|---|---|
+| Wrong API param: `maker_address` instead of `proxyWallet` | Critical | Fixed — confirmed correct from `whale_scanner.ts` line 1760 |
+| `onTimer()` not awaited in engine tick | Critical | Fixed — async whale fetch completes before signal processing |
+| `min_whale_win_rate` configured but never checked | Medium | Fixed — gate added in `passesFilters()` after 5+ trade history |
+| Market not in stream cache causes silent signal drop | Medium | Added debug log for every dropped signal |
+
+### 11.2 Remaining Operational Requirement
+**`whale_addresses: []` in config.yaml** — copy-trade will not poll any whale without at least one valid Ethereum address configured.  The address must be a Polymarket **proxy wallet** address (not EOA).  These can be found by:
+1. Going to a market on Polymarket and clicking a large position.
+2. Copying the wallet address from the profile URL.
+3. Validating it is a 40-char hex address (0x...).
+4. Adding it to `strategy_config.copy_trade.whale_addresses` in config.yaml.
+
+### 11.3 Known Limitation
+The market stream caches only the markets that the Gamma API returns (trending/active markets up to the cache cap).  A whale trading a niche or newly created market may not be in the stream at poll time.  The debug log now reports these misses so the pattern can be evaluated.  If misses are high, consider: increasing the stream's market poll coverage, or adding a targeted market fetch for the whale's trade market ID.
+
+### 11.4 Validation
+- Build: PASS
+- Tests: PASS (174) — existing copy-trade test updated to assert correct `proxyWallet` param

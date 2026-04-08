@@ -81,6 +81,63 @@ export class Engine {
     consoleLog.warn('ENGINE', 'Engine stopped');
   }
 
+  /**
+   * Emergency-close all open positions tracked by every registered wallet.
+   * Bypasses the risk engine (which would block orders while kill switch is active).
+   * Returns counts of attempted and succeeded SELL submissions.
+   *
+   * Note: Positions are based on the bot's internal position tracking, not fetched
+   * from chain.  For live wallets this submits SELL limit orders at the last known
+   * market price; fills are contingent on available CLOB liquidity.
+   */
+  async closeAllPositions(reason: string): Promise<{ attempted: number; succeeded: number }> {
+    let attempted = 0;
+    let succeeded = 0;
+
+    consoleLog.warn('ENGINE', `Emergency close all positions triggered — reason: ${reason}`);
+    logger.warn({ reason }, 'closeAllPositions: starting emergency position close');
+
+    for (const [walletId, wallet] of this.walletManager.getWalletsMap()) {
+      const state = wallet.getState();
+      const positions = state.openPositions;
+
+      if (positions.length === 0) continue;
+
+      for (const pos of positions) {
+        // Look up last known market price from the stream cache
+        const market = this.stream.getMarket(pos.marketId);
+        const price = market
+          ? (pos.outcome === 'YES'
+              ? market.outcomePrices[0]
+              : (market.outcomePrices[1] ?? 1 - market.outcomePrices[0]))
+          : pos.avgPrice;
+        const safePrice = Number(Math.max(0.01, Math.min(0.99, price)).toFixed(4));
+
+        attempted++;
+        try {
+          await wallet.placeOrder({
+            marketId: pos.marketId,
+            outcome: pos.outcome,
+            side: 'SELL',
+            price: safePrice,
+            size: Math.abs(pos.size),
+          });
+          succeeded++;
+          consoleLog.success('ENGINE', `Emergency close: ${walletId} SELL ${pos.outcome} ×${pos.size} @ ${safePrice} [${pos.marketId.slice(0, 12)}…]`);
+          logger.info({ walletId, marketId: pos.marketId, outcome: pos.outcome, size: pos.size, price: safePrice, reason }, 'Emergency position closed');
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          consoleLog.error('ENGINE', `Emergency close failed: ${walletId} ${pos.marketId.slice(0, 12)}… — ${msg}`);
+          logger.error({ walletId, marketId: pos.marketId, err: msg, reason }, 'Emergency close order failed');
+        }
+      }
+    }
+
+    consoleLog.warn('ENGINE', `Emergency close complete — ${succeeded}/${attempted} positions closed`);
+    logger.warn({ reason, attempted, succeeded }, 'closeAllPositions: complete');
+    return { attempted, succeeded };
+  }
+
   /** Expose the stream so the dashboard can query live market data */
   getStream(): OrderbookStream {
     return this.stream;
@@ -215,7 +272,7 @@ export class Engine {
 
     for (const runner of this.runners) {
       if (this.pausedWallets.has(runner.walletId)) continue;  // skip paused
-      runner.strategy.onTimer();
+      await runner.strategy.onTimer();
       await this.processSignals(runner);
     }
   }

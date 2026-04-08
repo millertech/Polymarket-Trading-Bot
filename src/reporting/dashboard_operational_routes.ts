@@ -5,12 +5,14 @@ import { consoleLog } from './console_log';
 import type { WhaleAPI } from '../whales/whale_api';
 import type { Engine } from '../core/engine';
 import { WalletManager } from '../wallets/wallet_manager';
+import type { Database } from '../storage/database';
 
 export type DashboardOperationalRouteDeps = {
   walletManager: WalletManager;
   walletDisplayNames: Map<string, string>;
   whaleApi?: WhaleAPI;
   engine?: Engine;
+  db?: Database;
   sseClients: Set<http.ServerResponse>;
   getLiveMarketPrices: () => Map<string, number>;
   json: (res: http.ServerResponse, status: number, body: unknown) => void;
@@ -88,6 +90,45 @@ export async function handleDashboardOperationalRoutes(
       walletDisplayNames,
     );
     res.write(`event: dashboard\ndata: ${JSON.stringify(payload)}\n\n`);
+    return true;
+  }
+
+  /* ── Audit Log ── */
+  if (path === '/api/audit' && method === 'GET') {
+    if (!deps.db) {
+      json(res, 503, { ok: false, error: 'Database not available' });
+      return true;
+    }
+    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+    const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get('limit')) || 200));
+    try {
+      const events = deps.db.loadAuditEvents(limit);
+      json(res, 200, { ok: true, events });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      json(res, 500, { ok: false, error: msg });
+    }
+    return true;
+  }
+
+  /* ── PnL History ── */
+  if (path === '/api/pnl/history' && method === 'GET') {
+    if (!deps.db) {
+      json(res, 503, { ok: false, error: 'Database not available' });
+      return true;
+    }
+    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+    const walletId = url.searchParams.get('wallet_id');
+    const limit = Math.min(2000, Math.max(1, Number(url.searchParams.get('limit')) || 500));
+    try {
+      const rows = walletId
+        ? deps.db.loadPnlHistory(walletId, limit)
+        : deps.db.loadPnlHistoryAllWallets(limit);
+      json(res, 200, { ok: true, snapshots: rows });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      json(res, 500, { ok: false, error: msg });
+    }
     return true;
   }
 

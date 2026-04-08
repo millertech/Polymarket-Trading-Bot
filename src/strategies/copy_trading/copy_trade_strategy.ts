@@ -376,7 +376,15 @@ export class CopyTradeStrategy extends BaseStrategy {
       if (this.positions.has(signal.marketId)) continue;
 
       const market = this.markets.get(signal.marketId);
-      if (!market) continue;
+      if (!market) {
+        logger.debug({
+          strategy: this.name,
+          marketId: signal.marketId,
+          whale: whaleTrade?.whaleAddress?.slice(0, 10) ?? 'unknown',
+          cachedMarkets: this.markets.size,
+        }, '[copy_trade] signal dropped — market not in stream cache (whale trading outside current market set)');
+        continue;
+      }
 
       // Market liquidity / volume filters
       if (market.liquidity < this.cfg.min_market_liquidity) continue;
@@ -541,7 +549,9 @@ export class CopyTradeStrategy extends BaseStrategy {
   /** Fetch recent trades for a whale address from the Polymarket data API */
   private async fetchWhaleTrades(address: string): Promise<NormalisedWhaleTrade[]> {
     try {
-      const url = `${this.cfg.data_api_url}/trades?maker_address=${encodeURIComponent(address)}&limit=50`;
+      // Use proxyWallet query param — confirmed correct by whale_scanner.ts usage.
+      // The old `maker_address` param is not a valid filter and returns unfiltered results.
+      const url = `${this.cfg.data_api_url}/trades?proxyWallet=${encodeURIComponent(address)}&limit=50`;
       const res = await fetch(url);
       if (!res.ok) {
         logger.debug({ address, status: res.status }, '[copy_trade] API request failed');
@@ -596,6 +606,18 @@ export class CopyTradeStrategy extends BaseStrategy {
 
     // Already have a position in this market
     if (this.positions.has(trade.marketId)) return false;
+
+    // Whale win-rate check — skip whales below the minimum threshold.
+    // Only applies once the whale has enough history to be meaningful (≥5 trades).
+    const whaleKey = trade.whaleAddress.toLowerCase();
+    const perf = this.whalePerf.get(whaleKey);
+    if (perf && perf.tradesCopied >= 5) {
+      const total = perf.wins + perf.losses;
+      if (total > 0) {
+        const winRate = perf.wins / total;
+        if (winRate < this.cfg.min_whale_win_rate) return false;
+      }
+    }
 
     // Drawdown breaker
     if (this.getCurrentDrawdownPct() >= this.cfg.max_drawdown_pct) {

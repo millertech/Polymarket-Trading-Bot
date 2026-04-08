@@ -92,6 +92,29 @@ export class WalletManager {
     return map;
   }
 
+  /** Expose the raw wallet map for direct iteration (e.g. emergency close). */
+  getWalletsMap(): Map<string, ExecutionWallet> {
+    return this.wallets;
+  }
+
+  /**
+   * Calculate the total portfolio exposure (cost basis) for a given market
+   * across ALL registered wallets.  Used by the risk layer to enforce
+   * portfolio-level per-market limits independent of per-wallet checks.
+   */
+  getTotalMarketExposure(marketId: string): number {
+    let total = 0;
+    for (const wallet of this.wallets.values()) {
+      const state = wallet.getState();
+      for (const pos of state.openPositions) {
+        if (pos.marketId === marketId) {
+          total += Math.abs(pos.avgPrice * pos.size);
+        }
+      }
+    }
+    return total;
+  }
+
   removeWallet(walletId: string): boolean {
     if (!this.wallets.has(walletId)) {
       return false;

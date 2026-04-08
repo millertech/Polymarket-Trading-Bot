@@ -13,6 +13,7 @@ import type { WhaleAPI } from '../whales/whale_api';
 import type { Engine } from '../core/engine';
 import { CopyTradeStrategy } from '../strategies/copy_trading/copy_trade_strategy';
 import type { KillSwitch } from '../risk/kill_switch';
+import type { Database } from '../storage/database';
 import { handleDashboardCoreRoutes } from './dashboard_core_routes';
 import { handleDashboardWalletRoutes } from './dashboard_wallet_routes';
 import { handleDashboardStrategyRoutes } from './dashboard_strategy_routes';
@@ -33,6 +34,7 @@ export class DashboardServer {
   private server?: http.Server;
   private whaleApi?: WhaleAPI;
   private engine?: Engine;
+  private db?: Database;
   private sseClients: Set<http.ServerResponse> = new Set();
   private sseInterval?: ReturnType<typeof setInterval>;
   private readonly walletDisplayNames = new Map<string, string>();
@@ -47,6 +49,10 @@ export class DashboardServer {
 
   setWhaleApi(api: WhaleAPI): void {
     this.whaleApi = api;
+  }
+
+  setDatabase(db: Database): void {
+    this.db = db;
   }
 
   setEngine(engine: Engine): void {
@@ -269,6 +275,7 @@ export class DashboardServer {
       walletDisplayNames: this.walletDisplayNames,
       whaleApi: this.whaleApi,
       engine: this.engine,
+      db: this.db,
       sseClients: this.sseClients,
       getLiveMarketPrices: () => this.getLiveMarketPrices(),
       json,
