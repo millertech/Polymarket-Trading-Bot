@@ -1491,7 +1491,17 @@ function renderWalletDetail(d){
 
   html+='</div>'; /* /settings */
 
+  /* Preserve editable settings field values and focused element across re-renders
+     so the 2s auto-refresh does not wipe out what the user is typing. */
+  const _sfIds=['ws-display-name','ws-rl-maxPositionSize','ws-rl-maxExposurePerMarket','ws-rl-maxDailyLoss','ws-rl-maxOpenTrades','ws-rl-maxDrawdown'];
+  const _sfVals={};
+  const _sfFocusId=document.activeElement&&document.activeElement.id||null;
+  for(const id of _sfIds){const el=document.getElementById(id);if(el)_sfVals[id]=el.value;}
+
   document.getElementById('wd-content').innerHTML=html;
+
+  for(const id of _sfIds){const el=document.getElementById(id);if(el&&_sfVals[id]!==undefined)el.value=_sfVals[id];}
+  if(_sfFocusId){const fe=document.getElementById(_sfFocusId);if(fe)fe.focus();}
 
   /* ── Render SVG charts (only if overview tab is active) ── */
   if(wdActiveTab==='overview'){
