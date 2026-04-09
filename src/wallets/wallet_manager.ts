@@ -143,7 +143,7 @@ export class WalletManager {
     );
   }
 
-  async runLivePreflight(): Promise<void> {
+  async runLivePreflight(maxAttempts = 3, retryDelayMs = 3_000): Promise<void> {
     const failures: Array<{ walletId: string; reason: string; details?: Record<string, unknown> }> = [];
 
     for (const [walletId, wallet] of this.wallets.entries()) {
@@ -151,7 +151,19 @@ export class WalletManager {
       const state = wallet.getState();
       if (state.mode !== 'LIVE') continue;
 
-      const result = await wallet.preflightLiveAccess();
+      let result: { ok: boolean; reason?: string; details?: Record<string, unknown> } = { ok: false, reason: 'not run' };
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        result = await wallet.preflightLiveAccess();
+        if (result.ok) break;
+        const isNetworkError = !result.details || (result.reason ?? '').toLowerCase().includes('fetch failed') || (result.reason ?? '').toLowerCase().includes('clob preflight failed');
+        if (!isNetworkError || attempt === maxAttempts) break;
+        logger.warn(
+          { walletId, reason: result.reason, attempt, maxAttempts, retryDelayMs },
+          'LIVE preflight network error — retrying',
+        );
+        await new Promise((r) => setTimeout(r, retryDelayMs));
+      }
+
       if (!result.ok) {
         failures.push({
           walletId,

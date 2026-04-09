@@ -938,9 +938,13 @@ export class PolymarketWallet {
   private async safeFetch(
     url: string,
     init: RequestInit,
+    timeoutMs = 15_000,
   ): Promise<{ ok: boolean; status?: number; body?: string; headers?: Record<string, string>; error?: string }> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(url, init);
+      const response = await fetch(url, { ...init, signal: controller.signal });
+      clearTimeout(timer);
       let body = '';
       try { body = await response.text(); } catch { /* ignore */ }
       return {
@@ -950,9 +954,15 @@ export class PolymarketWallet {
         headers: this.pickDiagnosticHeaders(response),
       };
     } catch (error) {
+      clearTimeout(timer);
+      // Capture the underlying cause (e.g. ECONNREFUSED, ETIMEDOUT, ENOTFOUND)
+      // which undici/Node.js 18+ fetch attaches as error.cause
+      const cause = (error instanceof Error && (error as NodeJS.ErrnoException & { cause?: unknown }).cause);
+      const causeMsg = cause instanceof Error ? cause.message : (cause ? String(cause) : undefined);
+      const msg = error instanceof Error ? error.message : String(error);
       return {
         ok: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: causeMsg ? `${msg} (${causeMsg})` : msg,
       };
     }
   }
