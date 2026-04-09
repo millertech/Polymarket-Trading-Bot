@@ -6,6 +6,7 @@
    whale wallets for auto-tracking.
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
+import v8 from 'v8';
 import { logger } from '../reporting/logs';
 import type { WhaleDB } from './whale_db';
 import type {
@@ -117,7 +118,8 @@ const PERSISTENT_MARKET_CACHE_TTL_DAYS = 30;
 const SCANNER_MARKETS_JSON_MAX_BYTES = Number(ENV.SCANNER_MARKETS_JSON_MAX_BYTES ?? '8388608');
 const SCANNER_TRADES_JSON_MAX_BYTES = Number(ENV.SCANNER_TRADES_JSON_MAX_BYTES ?? '16777216');
 const SCANNER_SMALL_JSON_MAX_BYTES = Number(ENV.SCANNER_SMALL_JSON_MAX_BYTES ?? '1048576');
-const MAX_TRADES_PER_SIDE_PER_MARKET = Number(ENV.SCANNER_MAX_TRADES_PER_SIDE_PER_MARKET ?? '600');
+const MAX_TRADES_PER_SIDE_PER_MARKET = Number(ENV.SCANNER_MAX_TRADES_PER_SIDE_PER_MARKET ?? '200');
+const MAX_MARKETS_PER_ADDRESS = Number(ENV.SCANNER_MAX_MARKETS_PER_ADDRESS ?? '50');
 const SCANNER_HIGH_MEMORY_UTILIZATION_PCT = Math.min(
   0.98,
   Math.max(0.5, Number(ENV.SCANNER_HIGH_MEMORY_UTILIZATION_PCT ?? '0.88')),
@@ -999,9 +1001,14 @@ export class WhaleScanner {
 
   private isMemoryPressureHigh(): boolean {
     const mem = process.memoryUsage();
-    const heapTotal = mem.heapTotal;
-    if (heapTotal <= 0) return false;
-    return (mem.heapUsed / heapTotal) >= SCANNER_HIGH_MEMORY_UTILIZATION_PCT;
+    let limitBytes: number;
+    try {
+      limitBytes = v8.getHeapStatistics().heap_size_limit;
+    } catch {
+      limitBytes = mem.heapTotal;
+    }
+    if (limitBytes <= 0) return false;
+    return (mem.heapUsed / limitBytes) >= SCANNER_HIGH_MEMORY_UTILIZATION_PCT;
   }
 
   /** Evict oldest entries from unbounded in-memory structures to prevent OOM */
@@ -1012,6 +1019,14 @@ export class WhaleScanner {
         .sort((a, b) => b[1].trades - a[1].trades)
         .slice(0, WhaleScanner.MAX_GLOBAL_AGG);
       this.globalAgg = new Map(sorted);
+    }
+
+    // Trim per-address market maps to MAX_MARKETS_PER_ADDRESS (keep highest volume)
+    for (const agg of this.globalAgg.values()) {
+      if (agg.markets.size > MAX_MARKETS_PER_ADDRESS) {
+        const sorted = [...agg.markets.entries()].sort((a, b) => b[1].volumeUsd - a[1].volumeUsd);
+        agg.markets = new Map(sorted.slice(0, MAX_MARKETS_PER_ADDRESS));
+      }
     }
 
     // seenTradeHashes: clear when too large (dedup is best-effort)
@@ -1283,6 +1298,16 @@ export class WhaleScanner {
         if (t.match_time > agg.lastTradeTs) agg.lastTradeTs = t.match_time;
 
         if (!agg.markets.has(marketId)) {
+          // Prevent unbounded market-map growth per address
+          if (agg.markets.size >= MAX_MARKETS_PER_ADDRESS) {
+            // Drop the market with the lowest volume to make room
+            let minKey = '';
+            let minVol = Infinity;
+            for (const [k, v] of agg.markets) {
+              if (v.volumeUsd < minVol) { minVol = v.volumeUsd; minKey = k; }
+            }
+            if (minKey) agg.markets.delete(minKey);
+          }
           agg.markets.set(marketId, {
             question,
             buys: [],
