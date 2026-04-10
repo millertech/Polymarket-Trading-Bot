@@ -118,8 +118,9 @@ const PERSISTENT_MARKET_CACHE_TTL_DAYS = 30;
 const SCANNER_MARKETS_JSON_MAX_BYTES = Number(ENV.SCANNER_MARKETS_JSON_MAX_BYTES ?? '8388608');
 const SCANNER_TRADES_JSON_MAX_BYTES = Number(ENV.SCANNER_TRADES_JSON_MAX_BYTES ?? '16777216');
 const SCANNER_SMALL_JSON_MAX_BYTES = Number(ENV.SCANNER_SMALL_JSON_MAX_BYTES ?? '1048576');
-const MAX_TRADES_PER_SIDE_PER_MARKET = Number(ENV.SCANNER_MAX_TRADES_PER_SIDE_PER_MARKET ?? '200');
-const MAX_MARKETS_PER_ADDRESS = Number(ENV.SCANNER_MAX_MARKETS_PER_ADDRESS ?? '50');
+const MAX_TRADES_PER_SIDE_PER_MARKET = Number(ENV.SCANNER_MAX_TRADES_PER_SIDE_PER_MARKET ?? '50');
+const MAX_MARKETS_PER_ADDRESS = Number(ENV.SCANNER_MAX_MARKETS_PER_ADDRESS ?? '20');
+const MAX_LATEST_PROFILES = Number(ENV.SCANNER_MAX_LATEST_PROFILES ?? '500');
 const SCANNER_HIGH_MEMORY_UTILIZATION_PCT = Math.min(
   0.98,
   Math.max(0.5, Number(ENV.SCANNER_HIGH_MEMORY_UTILIZATION_PCT ?? '0.88')),
@@ -878,6 +879,8 @@ export class WhaleScanner {
         this.state.scanDurationMs = Date.now() - batchStart;
         this.state.lastScanAt = new Date().toISOString();
         this.state.totalScansCompleted++;
+        // Clear all per-sweep accumulation — prevents monotonic growth across sweeps
+        this.globalAgg.clear();
         this.scannedMarketIds.clear();
         this.seenTradeHashes.clear();
         this.crossReferencedAddresses.clear();
@@ -896,6 +899,9 @@ export class WhaleScanner {
 
       /* ── Big-trade spike detection ── */
       this.detectBigTrades();
+
+      // Always prune after each batch to prevent inter-batch growth
+      this.pruneMemory();
 
       const skipHeavyScannerPhases = this.isMemoryPressureHigh();
       if (skipHeavyScannerPhases) {
@@ -991,10 +997,13 @@ export class WhaleScanner {
 
   private rebuildProfiles(): void {
     const profiles = this.profileAddresses(this.globalAgg);
-    this.latestProfiles = profiles;
-    this.state.addressesAnalysed = profiles.length;
-    this.state.profilesFound = profiles.length;
-    this.state.qualifiedCount = profiles.filter(
+    // Cap latestProfiles — keeps the highest-scoring entries only
+    this.latestProfiles = profiles.length > MAX_LATEST_PROFILES
+      ? profiles.slice(0, MAX_LATEST_PROFILES)
+      : profiles;
+    this.state.addressesAnalysed = this.latestProfiles.length;
+    this.state.profilesFound = this.latestProfiles.length;
+    this.state.qualifiedCount = this.latestProfiles.filter(
       (p) => p.compositeScore >= this.scannerConfig.autoPromoteMinScore,
     ).length;
   }
