@@ -24,6 +24,15 @@ export class OrderRouter {
   private readonly riskLogState = new Map<string, { lastLoggedAt: number; suppressed: number }>();
   private lastRiskLogCleanupAt = 0;
 
+  /**
+   * In-flight deduplication: prevents the same order (same wallet+market+outcome+side)
+   * from being submitted more than once within ORDER_DEDUP_WINDOW_MS (default 30 s).
+   * This closes the gap between signal generation and fill acknowledgment during
+   * which repeated signals for the same market would otherwise all be submitted.
+   */
+  private readonly inFlightWindowMs = Number(process.env.ORDER_DEDUP_WINDOW_MS ?? '30000');
+  private readonly inFlightOrders = new Map<string, number>(); // key → last submitted at
+
   /** Portfolio-level per-market exposure limit across all wallets (USD).
    *  Override via MAX_PORTFOLIO_EXPOSURE_PER_MARKET env var. */
   private readonly maxPortfolioExposurePerMarket = Math.max(
@@ -119,11 +128,33 @@ export class OrderRouter {
       }
     }
 
+    /* ── In-flight deduplication ────────────────────────────────── */
+    const orderKey = `${order.walletId}:${order.marketId}:${order.outcome}:${order.side}`;
+    const lastSubmittedAt = this.inFlightOrders.get(orderKey) ?? 0;
+    const now3 = Date.now();
+    if (now3 - lastSubmittedAt < this.inFlightWindowMs) {
+      const suppressMsg = `Duplicate in-flight order suppressed: ${order.side} ${order.outcome} on ${order.marketId} [${order.walletId}]`;
+      const dedupeKey3 = `inflight:${orderKey}`;
+      const dedupe3 = this.riskLogState.get(dedupeKey3);
+      if (!dedupe3 || now3 - dedupe3.lastLoggedAt >= this.riskLogWindowMs) {
+        consoleLog.warn('RISK', suppressMsg, { walletId: order.walletId, marketId: order.marketId });
+        this.riskLogState.set(dedupeKey3, { lastLoggedAt: now3, suppressed: 0 });
+      } else {
+        dedupe3.suppressed += 1;
+        recordOrderRouterRiskSuppressed();
+      }
+      recordOrderRouterRiskRejection();
+      recordExecutionRouteFailure();
+      recordExecutionRouteLatency(now3 - routeStartedAt);
+      return false;
+    }
+
     const submitStartedAt = Date.now();
     recordExecutionSubmitAttempt();
 
     try {
       await this.tradeExecutor.execute(order, wallet);
+      this.inFlightOrders.set(orderKey, Date.now());
       recordExecutionSubmitLatency(Date.now() - submitStartedAt);
       recordExecutionRouteSuccess();
       return true;
@@ -146,6 +177,13 @@ export class OrderRouter {
     for (const [key, value] of this.riskLogState.entries()) {
       if (now - value.lastLoggedAt > this.riskLogRetentionMs) {
         this.riskLogState.delete(key);
+      }
+    }
+
+    // Clean up expired in-flight order records
+    for (const [key, submittedAt] of this.inFlightOrders.entries()) {
+      if (now - submittedAt > this.inFlightWindowMs * 2) {
+        this.inFlightOrders.delete(key);
       }
     }
 

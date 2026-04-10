@@ -147,7 +147,9 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
 
   /* ── Sizing: risk-adjusted with Kelly ───────────────────────── */
   override sizePositions(signals: Signal[]): OrderRequest[] {
-    const capital = this.context?.wallet.availableBalance ?? 100;
+    const availBal = this.context?.wallet.availableBalance ?? 100;
+    const configCap = this.context?.wallet.capitalAllocated ?? 100;
+    const capital = Math.min(availBal, configCap);
     const walletId = this.context?.wallet.walletId ?? 'unknown';
     const now = Date.now();
 
@@ -392,7 +394,23 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
     const spreadPct = market.spread / Math.max(market.midPrice, 0.01);
     if (spreadPct < MIN_SPREAD_PCT) return false;
 
+    // Skip sports/esports game outcome markets — wide spreads on game lines
+    // look like mispricing opportunities but are not mean-reverting.
+    if (this.isSportsMarket(market)) return false;
+
     return true;
+  }
+
+  /**
+   * Returns true for sports/esports game outcome markets that mispricing
+   * detection should not trade: spreads, over/unders, straight-up game winners.
+   */
+  private isSportsMarket(market: MarketData): boolean {
+    const q = market.question;
+    if (/^(Spread:|LoL:|Wuning:|Game\s+Handicap:|Game\s+\d)/i.test(q)) return true;
+    if (/:\s*O\/U\s+\d/i.test(q)) return true;
+    if (/\bvs\.?\s+[A-Z]/i.test(q) && !/^Will\b/i.test(q) && !/\bby\s+[A-Z]/i.test(q)) return true;
+    return false;
   }
 
   private groupByEvent(): Map<string, MarketData[]> {

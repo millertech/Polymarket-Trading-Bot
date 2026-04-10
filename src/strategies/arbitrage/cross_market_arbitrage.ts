@@ -182,7 +182,9 @@ export class CrossMarketArbitrageStrategy extends BaseStrategy {
 
   /* ── Sizing: half-Kelly with capital constraints ────────────── */
   override sizePositions(signals: Signal[]): OrderRequest[] {
-    const capital = this.context?.wallet.availableBalance ?? 100;
+    const availBal = this.context?.wallet.availableBalance ?? 100;
+    const configCap = this.context?.wallet.capitalAllocated ?? 100;
+    const capital = Math.min(availBal, configCap);
     const walletId = this.context?.wallet.walletId ?? 'unknown';
     const now = Date.now();
 
@@ -340,7 +342,32 @@ export class CrossMarketArbitrageStrategy extends BaseStrategy {
     // Skip markets with essentially no spread (nothing to capture)
     if (market.spread < 0.001) return false;
 
+    // Skip sports/esports game outcome markets — they look like mispricings
+    // but are priced by sharp bettors and resolve on unpredictable game results.
+    if (this.isSportsMarket(market)) return false;
+
     return true;
+  }
+
+  /**
+   * Returns true for sports/esports game outcome markets that arb strategies
+   * should not trade: spreads, over/unders, straight-up game winners.
+   *
+   * Patterns detected:
+   *   - "Spread: Team (-X.5)"       → sports point spread
+   *   - "X vs. Y: O/U N.N"         → sports total
+   *   - "LoL: ...", "Wuning: ..."  → esports events
+   *   - "Game Handicap: ..."        → esports handicap
+   *   - "Team A vs[.] Team B"       → plain game winner (no "Will" / no date)
+   */
+  private isSportsMarket(market: MarketData): boolean {
+    const q = market.question;
+    if (/^(Spread:|LoL:|Wuning:|Game\s+Handicap:|Game\s+\d)/i.test(q)) return true;
+    if (/:\s*O\/U\s+\d/i.test(q)) return true;
+    // Plain game-winner markets: contain "vs." or "vs " but don't start with
+    // "Will" and don't have a date qualifier like "by April" or "by May".
+    if (/\bvs\.?\s+[A-Z]/i.test(q) && !/^Will\b/i.test(q) && !/\bby\s+[A-Z]/i.test(q)) return true;
+    return false;
   }
 
   /* ── Helper: confidence scoring ─────────────────────────────── */
