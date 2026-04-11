@@ -12,6 +12,7 @@ import {
 import type { WhaleAPI } from '../whales/whale_api';
 import type { Engine } from '../core/engine';
 import { CopyTradeStrategy } from '../strategies/copy_trading/copy_trade_strategy';
+import { LongshotHunterStrategy } from '../strategies/longshot/longshot_hunter';
 import type { KillSwitch } from '../risk/kill_switch';
 import type { Database } from '../storage/database';
 import { handleDashboardCoreRoutes } from './dashboard_core_routes';
@@ -257,6 +258,12 @@ export class DashboardServer {
         return this.engine
           .getStrategiesByName('copy_trade')
           .filter((s): s is CopyTradeStrategy => s instanceof CopyTradeStrategy);
+      },
+      getLongshotInstances: () => {
+        if (!this.engine) return [];
+        return this.engine
+          .getStrategiesByName('longshot_hunter')
+          .filter((s): s is LongshotHunterStrategy => s instanceof LongshotHunterStrategy);
       },
     })) {
       return;

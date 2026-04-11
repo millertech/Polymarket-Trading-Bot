@@ -146,6 +146,42 @@ export async function handleDashboardWalletRoutes(
     return true;
   }
 
+  if (path.match(/^\/api\/wallets\/[^/]+\/reset$/) && method === 'POST') {
+    const walletId = decodeURIComponent(path.split('/')[3]);
+    const wallet = walletManager.getWallet(walletId);
+    if (!wallet) {
+      json(res, 404, { ok: false, error: `Wallet "${walletId}" not found` });
+      return true;
+    }
+    if (typeof wallet.resetRuntimeState !== 'function') {
+      json(res, 400, { ok: false, error: 'This wallet type does not support runtime reset' });
+      return true;
+    }
+
+    const wasPaused = engine?.isRunnerPaused(walletId) ?? false;
+    if (engine && !wasPaused) {
+      engine.pauseRunner(walletId);
+    }
+
+    try {
+      wallet.resetRuntimeState();
+      json(res, 200, {
+        ok: true,
+        message: `Wallet "${walletId}" runtime state reset`,
+        paused: wasPaused,
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      json(res, 500, { ok: false, error: `Failed to reset wallet "${walletId}": ${reason}` });
+    } finally {
+      if (engine && !wasPaused) {
+        engine.resumeRunner(walletId);
+      }
+    }
+
+    return true;
+  }
+
   if (path.match(/^\/api\/wallets\/[^/]+\/detail$/) && method === 'GET') {
     const walletId = decodeURIComponent(path.split('/')[3]);
     const walletState = walletManager.listWallets().find((w) => w.walletId === walletId);

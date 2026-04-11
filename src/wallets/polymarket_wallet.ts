@@ -138,6 +138,18 @@ export class PolymarketWallet {
     );
   }
 
+  resetRuntimeState(): void {
+    this.state.availableBalance = this.state.capitalAllocated;
+    this.state.realizedPnl = 0;
+    this.state.openPositions = [];
+    this.trades.splice(0, this.trades.length);
+
+    logger.warn(
+      { walletId: this.state.walletId },
+      'Reset LIVE wallet runtime state via dashboard action',
+    );
+  }
+
   async preflightLiveAccess(): Promise<LivePreflightResult> {
     const credValidation = this.validateLiveCredentialInputs();
     if (!credValidation.ok) {

@@ -1485,6 +1485,9 @@ function renderWalletDetail(d){
 
   /* Danger Zone */
   html+='<div class="ws-danger"><h3>\u26A0\uFE0F Danger Zone</h3>'+
+    '<p>Reset runtime state for this wallet (open positions, trade history, and realized PnL) and restore available balance to allocated capital.</p>'+
+    '<button class="btn btn-danger" onclick="resetWalletFromDetail(\\''+w.walletId+'\\')">Reset Wallet State</button>'+
+    '<span id="ws-reset-msg" class="ws-msg" style="display:none;margin-left:8px"></span>'+
     '<p>Permanently remove this wallet and all its data. This action cannot be undone.</p>'+
     '<button class="btn btn-danger" onclick="deleteWalletFromDetail(\\''+w.walletId+'\\')">Delete Wallet</button>'+
     '</div>';
@@ -1567,6 +1570,24 @@ async function deleteWalletFromDetail(walletId){
     if(j.ok){closeWalletDetail();refresh()}
     else{alert(j.error||'Failed to delete')}
   }catch(e){alert('Network error')}
+}
+
+async function resetWalletFromDetail(walletId){
+  if(!confirm('Reset wallet "'+walletId+'" runtime state? This clears open positions, trade history, and realized PnL.'))return;
+  try{
+    const r=await fetch('/api/wallets/'+encodeURIComponent(walletId)+'/reset',{method:'POST'});
+    const j=await r.json();
+    showWsMsg('ws-reset-msg',j.ok?'ok':'err',j.message||j.error||'Reset failed');
+    if(j.ok){
+      if(walletDetailId){
+        const rr=await fetch('/api/wallets/'+encodeURIComponent(walletDetailId)+'/detail');
+        if(rr.ok){renderWalletDetail(await rr.json())}
+      }
+      refresh();
+    }
+  }catch(e){
+    showWsMsg('ws-reset-msg','err','Network error');
+  }
 }
 
 function showWsMsg(id,type,msg){

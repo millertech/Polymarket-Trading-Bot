@@ -90,6 +90,18 @@ export class PaperWallet {
     );
   }
 
+  resetRuntimeState(): void {
+    this.state.availableBalance = this.state.capitalAllocated;
+    this.state.realizedPnl = 0;
+    this.state.openPositions = [];
+    this.trades.splice(0, this.trades.length);
+
+    logger.warn(
+      { walletId: this.state.walletId },
+      'Reset PAPER wallet runtime state via dashboard action',
+    );
+  }
+
   async placeOrder(request: {
     marketId: string;
     outcome: 'YES' | 'NO';

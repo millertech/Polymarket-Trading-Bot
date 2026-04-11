@@ -53,6 +53,24 @@ interface DailyPerfStats {
   maxDrawdownUsd: number;
 }
 
+export interface LongshotDailyPerformanceSnapshot {
+  periodStart: string;
+  periodEnd: string;
+  openPositions: number;
+  entryFills: number;
+  exitFills: number;
+  wins: number;
+  losses: number;
+  breakeven: number;
+  winRate: number;
+  realizedPnlUsd: number;
+  expectancyUsdPerExit: number;
+  profitFactor: number | 'Infinity';
+  entryNotionalUsd: number;
+  exitNotionalUsd: number;
+  maxDrawdownUsd: number;
+}
+
 const DEFAULTS: LongshotConfig = {
   enabled: true,
   min_entry_price: 0.01,
@@ -410,36 +428,21 @@ export class LongshotHunterStrategy extends BaseStrategy {
   }
 
   private emitDailySummary(reason: 'DAILY_ROLLOVER' | 'SHUTDOWN'): void {
-    const closed = this.dailyPerf.wins + this.dailyPerf.losses + this.dailyPerf.breakeven;
-    const decided = this.dailyPerf.wins + this.dailyPerf.losses;
-    const winRate = decided > 0 ? this.dailyPerf.wins / decided : 0;
-    const expectancy = closed > 0 ? this.dailyPerf.realizedPnlUsd / closed : 0;
-    const profitFactor = this.dailyPerf.grossLossUsd < 0
-      ? this.dailyPerf.grossWinUsd / Math.abs(this.dailyPerf.grossLossUsd)
-      : this.dailyPerf.grossWinUsd > 0 ? Number.POSITIVE_INFINITY : 0;
+    const summary = this.buildDailySummary(Date.now());
 
     logger.info(
       {
         strategy: this.name,
         reason,
-        periodStart: new Date(this.dayStartMs).toISOString(),
-        periodEnd: new Date().toISOString(),
-        openPositions: this.positions.length,
-        entryFills: this.dailyPerf.entryFills,
-        exitFills: this.dailyPerf.exitFills,
-        wins: this.dailyPerf.wins,
-        losses: this.dailyPerf.losses,
-        breakeven: this.dailyPerf.breakeven,
-        winRate: Number(winRate.toFixed(4)),
-        realizedPnlUsd: Number(this.dailyPerf.realizedPnlUsd.toFixed(4)),
-        expectancyUsdPerExit: Number(expectancy.toFixed(4)),
-        profitFactor: Number.isFinite(profitFactor) ? Number(profitFactor.toFixed(4)) : 'Infinity',
-        entryNotionalUsd: Number(this.dailyPerf.entryNotionalUsd.toFixed(4)),
-        exitNotionalUsd: Number(this.dailyPerf.exitNotionalUsd.toFixed(4)),
-        maxDrawdownUsd: Number(this.dailyPerf.maxDrawdownUsd.toFixed(4)),
+        ...summary,
       },
       'Longshot daily performance summary',
     );
+  }
+
+  getDailyPerformanceSnapshot(): LongshotDailyPerformanceSnapshot {
+    this.maybeRotateDailySummary(Date.now());
+    return this.buildDailySummary(Date.now());
   }
 
   private nextUtcMidnightMs(nowMs: number): number {
@@ -461,6 +464,34 @@ export class LongshotHunterStrategy extends BaseStrategy {
       exitNotionalUsd: 0,
       peakRealizedUsd: 0,
       maxDrawdownUsd: 0,
+    };
+  }
+
+  private buildDailySummary(now: number): LongshotDailyPerformanceSnapshot {
+    const closed = this.dailyPerf.wins + this.dailyPerf.losses + this.dailyPerf.breakeven;
+    const decided = this.dailyPerf.wins + this.dailyPerf.losses;
+    const winRate = decided > 0 ? this.dailyPerf.wins / decided : 0;
+    const expectancy = closed > 0 ? this.dailyPerf.realizedPnlUsd / closed : 0;
+    const profitFactor = this.dailyPerf.grossLossUsd < 0
+      ? this.dailyPerf.grossWinUsd / Math.abs(this.dailyPerf.grossLossUsd)
+      : this.dailyPerf.grossWinUsd > 0 ? Number.POSITIVE_INFINITY : 0;
+
+    return {
+      periodStart: new Date(this.dayStartMs).toISOString(),
+      periodEnd: new Date(now).toISOString(),
+      openPositions: this.positions.length,
+      entryFills: this.dailyPerf.entryFills,
+      exitFills: this.dailyPerf.exitFills,
+      wins: this.dailyPerf.wins,
+      losses: this.dailyPerf.losses,
+      breakeven: this.dailyPerf.breakeven,
+      winRate: Number(winRate.toFixed(4)),
+      realizedPnlUsd: Number(this.dailyPerf.realizedPnlUsd.toFixed(4)),
+      expectancyUsdPerExit: Number(expectancy.toFixed(4)),
+      profitFactor: Number.isFinite(profitFactor) ? Number(profitFactor.toFixed(4)) : 'Infinity',
+      entryNotionalUsd: Number(this.dailyPerf.entryNotionalUsd.toFixed(4)),
+      exitNotionalUsd: Number(this.dailyPerf.exitNotionalUsd.toFixed(4)),
+      maxDrawdownUsd: Number(this.dailyPerf.maxDrawdownUsd.toFixed(4)),
     };
   }
 

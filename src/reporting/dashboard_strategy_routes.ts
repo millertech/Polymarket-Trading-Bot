@@ -20,11 +20,16 @@ type CopyTradeInstanceLike = {
   removeWhaleAddress: (address: string) => boolean;
 };
 
+type LongshotInstanceLike = {
+  getDailyPerformanceSnapshot: () => object;
+};
+
 export type DashboardStrategyRouteDeps = {
   walletManager: WalletManager;
   json: JsonWriter;
   readJsonBody: JsonBodyReader;
   getCopyTradeInstances: () => CopyTradeInstanceLike[];
+  getLongshotInstances: () => LongshotInstanceLike[];
 };
 
 export async function handleDashboardStrategyRoutes(
@@ -34,7 +39,7 @@ export async function handleDashboardStrategyRoutes(
   method: string,
   deps: DashboardStrategyRouteDeps,
 ): Promise<boolean> {
-  const { walletManager, json, readJsonBody, getCopyTradeInstances } = deps;
+  const { walletManager, json, readJsonBody, getCopyTradeInstances, getLongshotInstances } = deps;
 
   if (path === '/api/strategies' && method === 'GET') {
     json(res, 200, getStrategyCatalog());
@@ -92,6 +97,34 @@ export async function handleDashboardStrategyRoutes(
       };
     });
     json(res, 200, { ok: true, addresses: addrs, stats, whalePerformance });
+    return true;
+  }
+
+  if (path === '/api/longshot/performance' && method === 'GET') {
+    const instances = getLongshotInstances();
+    const wallets = walletManager
+      .listWallets()
+      .filter((w) => w.assignedStrategy === 'longshot_hunter')
+      .map((w) => ({
+        walletId: w.walletId,
+        mode: w.mode,
+        capital: w.capitalAllocated,
+        balance: Number(w.availableBalance.toFixed(4)),
+        realizedPnl: Number(w.realizedPnl.toFixed(4)),
+      }));
+
+    const snapshots = instances.map((inst, idx) => ({
+      index: idx,
+      ...(inst.getDailyPerformanceSnapshot() as object),
+    }));
+
+    json(res, 200, {
+      ok: true,
+      strategy: 'longshot_hunter',
+      instances: snapshots,
+      walletCount: wallets.length,
+      wallets,
+    });
     return true;
   }
 

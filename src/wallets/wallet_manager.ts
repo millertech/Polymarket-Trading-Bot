@@ -28,6 +28,8 @@ export interface ExecutionWallet {
     trades: TradeRecord[];
     displayName?: string;
   }): void;
+  /** Optional runtime reset used by dashboard operations. */
+  resetRuntimeState?(): void;
 }
 
 export interface WalletRuntimeSnapshot {
