@@ -1577,7 +1577,20 @@ async function resetWalletFromDetail(walletId){
   if(!confirm('Reset wallet "'+walletId+'" runtime state? This clears open positions, trade history, and realized PnL.'))return;
   try{
     const r=await fetch('/api/wallets/'+encodeURIComponent(walletId)+'/reset',{method:'POST'});
-    const j=await r.json();
+    let j={};
+    try{j=await r.json()}catch(e){}
+    if(!r.ok && ((j&&j.error==='Not found') || r.status===404)){
+      const legacy = await resetWalletLegacy(walletId);
+      showWsMsg('ws-reset-msg',legacy.ok?'ok':'err',legacy.message||legacy.error||'Reset failed');
+      if(legacy.ok){
+        if(walletDetailId){
+          const rr=await fetch('/api/wallets/'+encodeURIComponent(walletDetailId)+'/detail');
+          if(rr.ok){renderWalletDetail(await rr.json())}
+        }
+        refresh();
+      }
+      return;
+    }
     showWsMsg('ws-reset-msg',j.ok?'ok':'err',j.message||j.error||'Reset failed');
     if(j.ok){
       if(walletDetailId){
@@ -1588,6 +1601,52 @@ async function resetWalletFromDetail(walletId){
     }
   }catch(e){
     showWsMsg('ws-reset-msg','err','Network error');
+  }
+}
+
+async function resetWalletLegacy(walletId){
+  try{
+    const detailResp=await fetch('/api/wallets/'+encodeURIComponent(walletId)+'/detail');
+    if(!detailResp.ok){
+      return {ok:false,error:'Wallet detail fetch failed'};
+    }
+    const detail=await detailResp.json();
+    const w=detail&&detail.wallet?detail.wallet:null;
+    if(!w){
+      return {ok:false,error:'Wallet payload missing'};
+    }
+
+    const delResp=await fetch('/api/wallets/'+encodeURIComponent(walletId),{method:'DELETE'});
+    const delBody=await delResp.json();
+    if(!delResp.ok||!delBody.ok){
+      return {ok:false,error:delBody.error||'Delete failed'};
+    }
+
+    const createPayload={
+      walletId:w.walletId,
+      strategy:w.strategy||w.assignedStrategy,
+      capital:w.capitalAllocated,
+      mode:w.mode,
+      maxPositionSize:w.riskLimits&&w.riskLimits.maxPositionSize,
+      maxExposurePerMarket:w.riskLimits&&w.riskLimits.maxExposurePerMarket,
+      maxDailyLoss:w.riskLimits&&w.riskLimits.maxDailyLoss,
+      maxOpenTrades:w.riskLimits&&w.riskLimits.maxOpenTrades,
+      maxDrawdown:w.riskLimits&&w.riskLimits.maxDrawdown,
+    };
+
+    const createResp=await fetch('/api/wallets',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(createPayload),
+    });
+    const createBody=await createResp.json();
+    if(!createResp.ok||!createBody.ok){
+      return {ok:false,error:createBody.error||'Create failed'};
+    }
+
+    return {ok:true,message:'Wallet runtime state reset (legacy fallback)'};
+  }catch(e){
+    return {ok:false,error:'Legacy fallback reset failed'};
   }
 }
 

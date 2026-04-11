@@ -146,7 +146,7 @@ export async function handleDashboardWalletRoutes(
     return true;
   }
 
-  if (path.match(/^\/api\/wallets\/[^/]+\/reset$/) && method === 'POST') {
+  if ((path.match(/^\/api\/wallets\/[^/]+\/reset$/) || path.match(/^\/api\/wallets\/[^/]+\/clear$/)) && method === 'POST') {
     const walletId = decodeURIComponent(path.split('/')[3]);
     const wallet = walletManager.getWallet(walletId);
     if (!wallet) {
