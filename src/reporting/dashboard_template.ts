@@ -1334,6 +1334,7 @@ function renderWalletDetail(d){
     '<div class="wd-status-indicator '+stCls+'"></div>'+
     '<div class="wd-status-text">'+stText+'<span class="sub">'+w.strategy+' \u00B7 '+w.mode+' \u00B7 $'+fmt(w.capitalAllocated,0)+' capital</span></div>'+
     '<button class="toggle-btn '+stCls+'" onclick="toggleWalletFromDetail(\\''+w.walletId+'\\','+isPaused+')"><span class="toggle-dot"></span>'+(isPaused?'\u25B6 Start':'\u23F8 Pause')+'</button>'+
+    '<button class="btn btn-danger btn-sm" style="margin-left:8px" onclick="resetWalletFromDetail(\\''+w.walletId+'\\')">Reset Wallet</button>'+
     '</div>';
 
   /* ── Tabs ── */
@@ -1863,7 +1864,7 @@ function renderWalletTable(wl){
       '<td>$'+fmt(w.availableBalance,2)+'</td>'+
       '<td class="'+pnlCls(w.realizedPnl)+'">$'+fmt(w.realizedPnl)+'</td>'+
       '<td>'+w.openPositions.length+'</td>'+
-      '<td style="display:flex;gap:6px;align-items:center"><button class="toggle-btn '+toggleCls+'" onclick="event.stopPropagation();toggleWallet(\\''+w.walletId+'\\','+isPaused+')" title="'+(isPaused?'Start':'Pause')+' this wallet"><span class="toggle-dot"></span>'+toggleLabel+'</button><button class="btn btn-danger btn-sm" onclick="event.stopPropagation();deleteWallet(\\''+w.walletId+'\\')">Remove</button></td>'+
+      '<td style="display:flex;gap:6px;align-items:center"><button class="toggle-btn '+toggleCls+'" onclick="event.stopPropagation();toggleWallet(\\''+w.walletId+'\\','+isPaused+')" title="'+(isPaused?'Start':'Pause')+' this wallet"><span class="toggle-dot"></span>'+toggleLabel+'</button><button class="btn btn-danger btn-sm" onclick="event.stopPropagation();resetWalletFromDetail(\\''+w.walletId+'\\')">Reset</button><button class="btn btn-danger btn-sm" onclick="event.stopPropagation();deleteWallet(\\''+w.walletId+'\\')">Remove</button></td>'+
       '</tr>';
   }).join('');
 }
