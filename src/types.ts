@@ -128,6 +128,26 @@ export interface ConvergenceConfig {
   max_cancel_rate: number;
 }
 
+export interface LongshotConfig {
+  enabled: boolean;
+  min_entry_price: number;
+  max_entry_price: number;
+  max_hours_to_resolution: number;
+  min_liquidity_usd: number;
+  min_volume_24h_usd: number;
+  min_price_momentum_pct: number;
+  volume_spike_multiplier: number;
+  min_buy_imbalance: number;
+  min_signal_score: number;
+  max_position_usd: number;
+  max_total_positions: number;
+  max_total_exposure_usd: number;
+  stop_loss_pct: number;
+  take_profit_price: number;
+  hold_to_resolution: boolean;
+  use_whale_signals: boolean;
+}
+
 export interface Signal {
   marketId: string;
   outcome: OrderOutcome;

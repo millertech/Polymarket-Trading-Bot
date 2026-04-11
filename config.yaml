@@ -24,6 +24,17 @@ wallets:
       max_open_trades: 10
       max_drawdown: 0.15
 
+  - id: paper_longshot_hunter
+    mode: PAPER
+    strategy: longshot_hunter
+    capital: 200
+    risk_limits:
+      max_position_size: 25
+      max_exposure_per_market: 50
+      max_daily_loss: 30
+      max_open_trades: 60
+      max_drawdown: 0.25
+
 strategy_config:
   cross_market_arbitrage:
     min_edge: 0.03
@@ -108,6 +119,26 @@ strategy_config:
     whitelist_markets: []
     min_market_liquidity: 500
     min_market_volume_24h: 1000
+
+  # ── Longshot Resolution Hunter ─────────────────────────────────────
+  longshot_hunter:
+    enabled: true
+    min_entry_price: 0.01
+    max_entry_price: 0.05
+    max_hours_to_resolution: 120
+    min_liquidity_usd: 300
+    min_volume_24h_usd: 100
+    min_price_momentum_pct: 0
+    volume_spike_multiplier: 1.0
+    min_buy_imbalance: 0.15
+    min_signal_score: 0.45
+    max_position_usd: 15
+    max_total_positions: 40
+    max_total_exposure_usd: 400
+    stop_loss_pct: 0.50
+    take_profit_price: 0.50
+    hold_to_resolution: true
+    use_whale_signals: false
 
 polymarket:
   gamma_api: https://gamma-api.polymarket.com
