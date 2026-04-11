@@ -3,9 +3,9 @@ environment:
 
 wallets:
   - id: wallet_1
-    mode: LIVE
+    mode: PAPER
     strategy: cross_market_arbitrage
-    capital: 50
+    capital: 200
     risk_limits:
       max_position_size: 5
       max_exposure_per_market: 15      # ~30% of $50 capital
@@ -16,12 +16,12 @@ wallets:
   - id: paper_mispricing_arb
     mode: LIVE
     strategy: mispricing_arbitrage
-    capital: 50
+    capital: 100
     risk_limits:
       max_position_size: 5
       max_exposure_per_market: 15      # ~30% of $50 capital
       max_daily_loss: 10               # 20% of $50 capital
-      max_open_trades: 10
+      max_open_trades: 30
       max_drawdown: 0.15
 
   - id: paper_longshot_hunter
