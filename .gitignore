@@ -47,3 +47,4 @@ sample_convergence_report.json
 # package-lock.json
 .cache/
 scripts/polymarket_live_order_test.py
+config.yaml
