@@ -38,6 +38,21 @@ interface ScanGateStats {
   rejected: Record<RejectReason, number>;
 }
 
+interface DailyPerfStats {
+  entryFills: number;
+  exitFills: number;
+  wins: number;
+  losses: number;
+  breakeven: number;
+  realizedPnlUsd: number;
+  grossWinUsd: number;
+  grossLossUsd: number;
+  entryNotionalUsd: number;
+  exitNotionalUsd: number;
+  peakRealizedUsd: number;
+  maxDrawdownUsd: number;
+}
+
 const DEFAULTS: LongshotConfig = {
   enabled: true,
   min_entry_price: 0.01,
@@ -65,6 +80,9 @@ export class LongshotHunterStrategy extends BaseStrategy {
   private positions: ManagedLongshotPosition[] = [];
   private volumeHistory = new Map<string, VolumeSnapshot[]>();
   private scanCounter = 0;
+  private dayStartMs = Date.now();
+  private nextDailySummaryMs = this.nextUtcMidnightMs(Date.now());
+  private dailyPerf: DailyPerfStats = this.emptyDailyPerf();
 
   protected override cooldownMs = 120_000;
 
@@ -72,6 +90,10 @@ export class LongshotHunterStrategy extends BaseStrategy {
     super.initialize(context);
     const raw = context.config as Partial<LongshotConfig>;
     this.cfg = { ...DEFAULTS, ...raw };
+    const now = Date.now();
+    this.dayStartMs = now;
+    this.nextDailySummaryMs = this.nextUtcMidnightMs(now);
+    this.dailyPerf = this.emptyDailyPerf();
 
     logger.info({ strategy: this.name, config: this.cfg }, 'Longshot hunter initialised');
   }
@@ -86,6 +108,8 @@ export class LongshotHunterStrategy extends BaseStrategy {
   }
 
   override generateSignals(): Signal[] {
+    this.maybeRotateDailySummary(Date.now());
+
     if (!this.cfg.enabled) return [];
     if (this.positions.length >= this.cfg.max_total_positions) return [];
 
@@ -183,19 +207,59 @@ export class LongshotHunterStrategy extends BaseStrategy {
     super.notifyFill(order);
     if (order.strategy !== this.name) return;
 
-    if (order.side === 'SELL') {
-      this.positions = this.positions.filter((p) => !(p.marketId === order.marketId && p.outcome === order.outcome));
+    this.maybeRotateDailySummary(Date.now());
+
+    if (order.side === 'BUY') {
+      this.dailyPerf.entryFills += 1;
+      this.dailyPerf.entryNotionalUsd += order.price * order.size;
+      this.positions.push({
+        marketId: order.marketId,
+        outcome: order.outcome,
+        side: order.side,
+        entryPrice: order.price,
+        entryTime: Date.now(),
+        size: order.size,
+      });
       return;
     }
 
-    this.positions.push({
-      marketId: order.marketId,
-      outcome: order.outcome,
-      side: order.side,
-      entryPrice: order.price,
-      entryTime: Date.now(),
-      size: order.size,
-    });
+    // On SELL fills, compute realized PnL against tracked entries (FIFO by array order).
+    let remaining = order.size;
+    let realizedUsd = 0;
+    let matchedSize = 0;
+
+    for (const pos of this.positions) {
+      if (remaining <= 0) break;
+      if (pos.marketId !== order.marketId || pos.outcome !== order.outcome) continue;
+      if (pos.size <= 0) continue;
+
+      const qty = Math.min(pos.size, remaining);
+      realizedUsd += (order.price - pos.entryPrice) * qty;
+      matchedSize += qty;
+      pos.size -= qty;
+      remaining -= qty;
+    }
+
+    this.positions = this.positions.filter((p) => p.size > 0);
+
+    if (matchedSize > 0) {
+      this.dailyPerf.exitFills += 1;
+      this.dailyPerf.exitNotionalUsd += order.price * matchedSize;
+      this.dailyPerf.realizedPnlUsd += realizedUsd;
+      if (realizedUsd > 0) {
+        this.dailyPerf.wins += 1;
+        this.dailyPerf.grossWinUsd += realizedUsd;
+      } else if (realizedUsd < 0) {
+        this.dailyPerf.losses += 1;
+        this.dailyPerf.grossLossUsd += realizedUsd;
+      } else {
+        this.dailyPerf.breakeven += 1;
+      }
+
+      this.dailyPerf.peakRealizedUsd = Math.max(this.dailyPerf.peakRealizedUsd, this.dailyPerf.realizedPnlUsd);
+      const drawdown = this.dailyPerf.peakRealizedUsd - this.dailyPerf.realizedPnlUsd;
+      this.dailyPerf.maxDrawdownUsd = Math.max(this.dailyPerf.maxDrawdownUsd, drawdown);
+    }
   }
 
   override managePositions(): void {
@@ -334,5 +398,73 @@ export class LongshotHunterStrategy extends BaseStrategy {
       },
       'Longshot queued exit order',
     );
+  }
+
+  private maybeRotateDailySummary(now: number): void {
+    if (now < this.nextDailySummaryMs) return;
+
+    this.emitDailySummary('DAILY_ROLLOVER');
+    this.dayStartMs = now;
+    this.nextDailySummaryMs = this.nextUtcMidnightMs(now);
+    this.dailyPerf = this.emptyDailyPerf();
+  }
+
+  private emitDailySummary(reason: 'DAILY_ROLLOVER' | 'SHUTDOWN'): void {
+    const closed = this.dailyPerf.wins + this.dailyPerf.losses + this.dailyPerf.breakeven;
+    const decided = this.dailyPerf.wins + this.dailyPerf.losses;
+    const winRate = decided > 0 ? this.dailyPerf.wins / decided : 0;
+    const expectancy = closed > 0 ? this.dailyPerf.realizedPnlUsd / closed : 0;
+    const profitFactor = this.dailyPerf.grossLossUsd < 0
+      ? this.dailyPerf.grossWinUsd / Math.abs(this.dailyPerf.grossLossUsd)
+      : this.dailyPerf.grossWinUsd > 0 ? Number.POSITIVE_INFINITY : 0;
+
+    logger.info(
+      {
+        strategy: this.name,
+        reason,
+        periodStart: new Date(this.dayStartMs).toISOString(),
+        periodEnd: new Date().toISOString(),
+        openPositions: this.positions.length,
+        entryFills: this.dailyPerf.entryFills,
+        exitFills: this.dailyPerf.exitFills,
+        wins: this.dailyPerf.wins,
+        losses: this.dailyPerf.losses,
+        breakeven: this.dailyPerf.breakeven,
+        winRate: Number(winRate.toFixed(4)),
+        realizedPnlUsd: Number(this.dailyPerf.realizedPnlUsd.toFixed(4)),
+        expectancyUsdPerExit: Number(expectancy.toFixed(4)),
+        profitFactor: Number.isFinite(profitFactor) ? Number(profitFactor.toFixed(4)) : 'Infinity',
+        entryNotionalUsd: Number(this.dailyPerf.entryNotionalUsd.toFixed(4)),
+        exitNotionalUsd: Number(this.dailyPerf.exitNotionalUsd.toFixed(4)),
+        maxDrawdownUsd: Number(this.dailyPerf.maxDrawdownUsd.toFixed(4)),
+      },
+      'Longshot daily performance summary',
+    );
+  }
+
+  private nextUtcMidnightMs(nowMs: number): number {
+    const d = new Date(nowMs);
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1, 0, 0, 0, 0);
+  }
+
+  private emptyDailyPerf(): DailyPerfStats {
+    return {
+      entryFills: 0,
+      exitFills: 0,
+      wins: 0,
+      losses: 0,
+      breakeven: 0,
+      realizedPnlUsd: 0,
+      grossWinUsd: 0,
+      grossLossUsd: 0,
+      entryNotionalUsd: 0,
+      exitNotionalUsd: 0,
+      peakRealizedUsd: 0,
+      maxDrawdownUsd: 0,
+    };
+  }
+
+  override shutdown(): void {
+    this.emitDailySummary('SHUTDOWN');
   }
 }
