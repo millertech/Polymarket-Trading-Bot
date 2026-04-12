@@ -365,14 +365,13 @@ export class MomentumStrategy extends BaseStrategy {
       }
 
       if (exitReason) {
-        this.pendingExits.push({
-          walletId: this.context?.wallet.walletId ?? 'unknown',
+        this.queueExitOrder({
           marketId,
           outcome: pos.outcome,
           side: 'SELL',
           price: currentPrice,
           size: pos.size,
-          strategy: this.name,
+          rawReason: exitReason,
         });
 
         this.managedPositions.delete(marketId);

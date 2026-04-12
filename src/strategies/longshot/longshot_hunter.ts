@@ -396,14 +396,13 @@ export class LongshotHunterStrategy extends BaseStrategy {
     );
     if (alreadyQueued) return;
 
-    this.pendingExits.push({
-      walletId,
+    this.queueExitOrder({
       marketId: position.marketId,
       outcome: position.outcome,
       side: 'SELL',
       price: Number(Math.max(0.01, Math.min(0.99, price)).toFixed(4)),
       size: position.size,
-      strategy: this.name,
+      rawReason: reason,
     });
 
     logger.info(

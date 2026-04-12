@@ -472,14 +472,13 @@ export class AiForecastStrategy extends BaseStrategy {
         pos.partialTaken = true;
 
         /* Queue partial SELL through the wallet */
-        this.pendingExits.push({
-          walletId: this.context?.wallet.walletId ?? 'unknown',
+        this.queueExitOrder({
           marketId: pos.marketId,
           outcome: pos.outcome,
           side: pos.side === 'BUY' ? 'SELL' : 'BUY',
           price: currentPrice,
           size: partialSize,
-          strategy: this.name,
+          rawReason: 'TAKE_PROFIT_PARTIAL',
         });
         continue;
       }
@@ -512,14 +511,13 @@ export class AiForecastStrategy extends BaseStrategy {
       if (exitReason) {
         toRemove.push(i);
         const exitSide: 'BUY' | 'SELL' = pos.side === 'BUY' ? 'SELL' : 'BUY';
-        this.pendingExits.push({
-          walletId: this.context?.wallet.walletId ?? 'unknown',
+        this.queueExitOrder({
           marketId: pos.marketId,
           outcome: pos.outcome,
           side: exitSide,
           price: currentPrice,
           size: pos.size,
-          strategy: this.name,
+          rawReason: exitReason,
         });
       }
     }

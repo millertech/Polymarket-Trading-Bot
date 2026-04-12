@@ -1,6 +1,6 @@
 import http from 'http';
 import { MarketFetcher } from '../data/market_fetcher';
-import { buildDashboardPayload } from './dashboard_api';
+import { attachReconciliationToPayload, buildDashboardPayload } from './dashboard_api';
 import { consoleLog } from './console_log';
 import type { WhaleAPI } from '../whales/whale_api';
 import type { Engine } from '../core/engine';
@@ -89,7 +89,8 @@ export async function handleDashboardOperationalRoutes(
       engine?.getPausedWallets(),
       walletDisplayNames,
     );
-    res.write(`event: dashboard\ndata: ${JSON.stringify(payload)}\n\n`);
+    const withRecon = attachReconciliationToPayload(payload, deps.db?.loadLatestReconciliationReport() ?? null);
+    res.write(`event: dashboard\ndata: ${JSON.stringify(withRecon)}\n\n`);
     return true;
   }
 
@@ -125,6 +126,85 @@ export async function handleDashboardOperationalRoutes(
         ? deps.db.loadPnlHistory(walletId, limit)
         : deps.db.loadPnlHistoryAllWallets(limit);
       json(res, 200, { ok: true, snapshots: rows });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      json(res, 500, { ok: false, error: msg });
+    }
+    return true;
+  }
+
+  /* ── Execution Ledger ── */
+  if (path === '/api/execution/ledger' && method === 'GET') {
+    if (!deps.db) {
+      json(res, 503, { ok: false, error: 'Database not available' });
+      return true;
+    }
+    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+    const walletId = url.searchParams.get('wallet_id') ?? undefined;
+    const limit = Math.min(5000, Math.max(1, Number(url.searchParams.get('limit')) || 500));
+    try {
+      const rows = deps.db.loadExecutionLedger(limit, walletId);
+      json(res, 200, { ok: true, rows });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      json(res, 500, { ok: false, error: msg });
+    }
+    return true;
+  }
+
+  /* ── Startup Reconciliation ── */
+  if (path === '/api/system/reconciliation' && method === 'GET') {
+    if (!deps.db) {
+      json(res, 503, { ok: false, error: 'Database not available' });
+      return true;
+    }
+    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+    const includeHistory = ['1', 'true', 'yes', 'on'].includes((url.searchParams.get('history') ?? '').toLowerCase());
+    const historyLimit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit')) || 25));
+    try {
+      const latest = deps.db.loadLatestReconciliationReport();
+      const history = includeHistory ? deps.db.loadReconciliationHistory(historyLimit) : undefined;
+      const unresolvedExits = deps.db.loadLifecycleUnresolvedExits();
+      const unresolvedWorkQueue = deps.db.loadPendingUnresolvedWorkQueue();
+      const unresolvedOrderWorkQueue = deps.db.loadPendingUnresolvedOrderQueue();
+      const walletSyncCursors = latest
+        ? latest.wallets
+            .filter((w) => w.mode === 'LIVE')
+            .map((w) => deps.db!.loadWalletSyncCursor(w.walletId))
+            .filter((c): c is NonNullable<typeof c> => Boolean(c))
+        : [];
+      json(res, 200, {
+        ok: true,
+        latest,
+        history,
+        unresolvedExits,
+        unresolvedWorkQueue,
+        unresolvedOrderWorkQueue,
+        walletSyncCursors,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      json(res, 500, { ok: false, error: msg });
+    }
+    return true;
+  }
+
+  /* ── Position Lifecycle ── */
+  const lifecycleMatch = /^\/api\/wallets\/([^/]+)\/lifecycle$/.exec(path);
+  if (lifecycleMatch && method === 'GET') {
+    if (!deps.db) {
+      json(res, 503, { ok: false, error: 'Database not available' });
+      return true;
+    }
+    const walletId = decodeURIComponent(lifecycleMatch[1]);
+    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+    const marketId = url.searchParams.get('market_id') ?? undefined;
+    const limit = Math.min(2000, Math.max(1, Number(url.searchParams.get('limit')) || 200));
+    try {
+      const rows = deps.db.loadPositionLifecycle(walletId, marketId, limit);
+      const openPositions = deps.db.loadOpenLifecyclePositions(walletId);
+      const unresolvedExits = deps.db.loadLifecycleUnresolvedExits(walletId);
+      json(res, 200, { ok: true, rows, openPositions, unresolvedExits });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       json(res, 500, { ok: false, error: msg });

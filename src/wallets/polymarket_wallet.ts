@@ -3,6 +3,7 @@ import { logger } from '../reporting/logs';
 import { consoleLog } from '../reporting/console_log';
 import { Wallet } from 'ethers';
 import { ClobClient, OrderType, Side } from '@polymarket/clob-client';
+import type { LiveWalletReconciliationResult } from './wallet_manager';
 
 type LivePreflightResult = {
   ok: boolean;
@@ -205,6 +206,124 @@ export class PolymarketWallet {
         clobApi: this.clobApi,
         chainId: this.chainId,
       },
+    };
+  }
+
+  async reconcileLiveState(): Promise<LiveWalletReconciliationResult> {
+    const notes: string[] = [];
+    let exchangeOpenOrders: number | undefined;
+    let exchangeOpenOrderIds: string[] | undefined;
+    let exchangeRecentFills: number | undefined;
+    let exchangeBalanceUsd: number | undefined;
+
+    try {
+      const client = await this.getClobClient();
+      const anyClient = client as unknown as Record<string, unknown>;
+
+      const openOrdersPayload = await this.tryClientMethods(anyClient, [
+        ['getOpenOrders'],
+        ['getOrders'],
+        ['listOpenOrders'],
+      ]);
+      if (openOrdersPayload.found) {
+        exchangeOpenOrders = this.extractArrayCount(openOrdersPayload.result);
+        exchangeOpenOrderIds = this.extractOpenOrderIds(openOrdersPayload.result);
+      } else {
+        notes.push('open orders endpoint unavailable in client version');
+      }
+
+      const fillsPayload = await this.tryClientMethods(anyClient, [
+        ['getFills'],
+        ['listFills'],
+        ['getTrades'],
+      ]);
+      if (fillsPayload.found) {
+        exchangeRecentFills = this.extractArrayCount(fillsPayload.result);
+      } else {
+        notes.push('fills endpoint unavailable in client version');
+      }
+
+      const balancePayload = await this.tryClientMethods(anyClient, [
+        ['getBalanceAllowance'],
+        ['getBalance'],
+        ['getBalances'],
+      ]);
+      if (balancePayload.found) {
+        exchangeBalanceUsd = this.extractNumericValue(balancePayload.result);
+      } else {
+        notes.push('balance endpoint unavailable in client version');
+      }
+    } catch (error) {
+      return {
+        status: 'red',
+        notes: [`client auth/reconciliation failed: ${error instanceof Error ? error.message : String(error)}`],
+      };
+    }
+
+    const localOpenPositions = this.state.openPositions.length;
+    const localTrades = this.trades.length;
+
+    if (exchangeOpenOrders === undefined && exchangeRecentFills === undefined && exchangeBalanceUsd === undefined) {
+      notes.push('exchange reconciliation data not available from client');
+      return {
+        status: 'yellow',
+        exchangeOpenOrders,
+        exchangeOpenOrderIds,
+        exchangeRecentFills,
+        exchangeBalanceUsd,
+        notes,
+      };
+    }
+
+    if (exchangeRecentFills !== undefined && localTrades > 0 && exchangeRecentFills === 0) {
+      notes.push('local trade history exists but exchange recent fills returned 0');
+      return {
+        status: 'red',
+        exchangeOpenOrders,
+        exchangeOpenOrderIds,
+        exchangeRecentFills,
+        exchangeBalanceUsd,
+        notes,
+      };
+    }
+
+    if (exchangeOpenOrders !== undefined && localOpenPositions > 0 && exchangeOpenOrders === 0) {
+      notes.push('local open positions exist while exchange open orders returned 0');
+      return {
+        status: 'yellow',
+        exchangeOpenOrders,
+        exchangeOpenOrderIds,
+        exchangeRecentFills,
+        exchangeBalanceUsd,
+        notes,
+      };
+    }
+
+    if (exchangeBalanceUsd !== undefined) {
+      const localBalance = Number(this.state.availableBalance);
+      const drift = Math.abs(exchangeBalanceUsd - localBalance);
+      const driftPct = localBalance > 0 ? drift / localBalance : 0;
+      if (drift > 50 || driftPct > 0.1) {
+        notes.push(`balance drift detected: local=${localBalance.toFixed(2)}, exchange=${exchangeBalanceUsd.toFixed(2)}`);
+        return {
+          status: 'yellow',
+          exchangeOpenOrders,
+          exchangeOpenOrderIds,
+          exchangeRecentFills,
+          exchangeBalanceUsd,
+          notes,
+        };
+      }
+    }
+
+    notes.push('wallet reconciliation checks passed');
+    return {
+      status: 'green',
+      exchangeOpenOrders,
+      exchangeOpenOrderIds,
+      exchangeRecentFills,
+      exchangeBalanceUsd,
+      notes,
     };
   }
 
@@ -851,6 +970,90 @@ export class PolymarketWallet {
     }
 
     return response;
+  }
+
+  private extractArrayCount(payload: unknown): number {
+    if (Array.isArray(payload)) return payload.length;
+    if (payload && typeof payload === 'object') {
+      const obj = payload as Record<string, unknown>;
+      for (const key of ['data', 'orders', 'fills', 'trades', 'items']) {
+        const value = obj[key];
+        if (Array.isArray(value)) return value.length;
+      }
+    }
+    return 0;
+  }
+
+  private extractOpenOrderIds(payload: unknown): string[] {
+    const orders = this.extractOrderArray(payload);
+    const ids: string[] = [];
+    for (const order of orders) {
+      if (!order || typeof order !== 'object') continue;
+      const obj = order as Record<string, unknown>;
+      const idCandidate = obj.orderID ?? obj.orderId ?? obj.id ?? obj.order_id;
+      if (typeof idCandidate === 'string' && idCandidate.trim()) {
+        ids.push(idCandidate.trim());
+      }
+    }
+    return ids;
+  }
+
+  private extractOrderArray(payload: unknown): unknown[] {
+    if (Array.isArray(payload)) return payload;
+    if (payload && typeof payload === 'object') {
+      const obj = payload as Record<string, unknown>;
+      for (const key of ['data', 'orders', 'items', 'result']) {
+        const value = obj[key];
+        if (Array.isArray(value)) return value;
+        if (value && typeof value === 'object') {
+          const nested = this.extractOrderArray(value);
+          if (nested.length > 0) return nested;
+        }
+      }
+    }
+    return [];
+  }
+
+  private extractNumericValue(payload: unknown): number | undefined {
+    if (typeof payload === 'number' && Number.isFinite(payload)) return payload;
+    if (typeof payload === 'string') {
+      const parsed = Number(payload);
+      return Number.isFinite(parsed) ? parsed : undefined;
+    }
+    if (!payload || typeof payload !== 'object') return undefined;
+
+    const obj = payload as Record<string, unknown>;
+    for (const key of ['balance', 'available', 'availableBalance', 'amount', 'usdc', 'total']) {
+      const value = obj[key];
+      const parsed = this.extractNumericValue(value);
+      if (parsed !== undefined) return parsed;
+    }
+
+    for (const key of ['data', 'result']) {
+      const parsed = this.extractNumericValue(obj[key]);
+      if (parsed !== undefined) return parsed;
+    }
+
+    return undefined;
+  }
+
+  private async tryClientMethods(
+    client: Record<string, unknown>,
+    methodNames: Array<Array<string>>,
+  ): Promise<{ found: boolean; result?: unknown }> {
+    for (const nameVariants of methodNames) {
+      for (const name of nameVariants) {
+        const maybeFn = client[name];
+        if (typeof maybeFn !== 'function') continue;
+        try {
+          const result = await (maybeFn as (...args: unknown[]) => Promise<unknown>).call(client);
+          return { found: true, result };
+        } catch {
+          // Keep probing alternate method names for compatibility across client versions.
+        }
+      }
+    }
+    return { found: false };
   }
 
   private isClobOrderAccepted(response: unknown): boolean {

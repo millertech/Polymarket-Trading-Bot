@@ -78,12 +78,18 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
   /* ── Signal generation ──────────────────────────────────────── */
   generateSignals(): Signal[] {
     const signals: Signal[] = [];
-    if (this.positions.length >= MAX_POSITIONS) return signals;
+    this.syncTrackedPositionsFromWallet();
+
+    const walletOpen = this.context?.wallet.openPositions ?? [];
+    if (walletOpen.length >= MAX_POSITIONS) return signals;
+
+    const occupiedMarkets = new Set(walletOpen.map((p) => p.marketId));
 
     const now = Date.now();
     const eventGroups = this.groupByEvent();
 
     for (const [marketId, market] of this.markets) {
+      if (occupiedMarkets.has(marketId)) continue;
       if (!this.passesFilters(market, now)) continue;
 
       const score = this.computeMispricingScore(marketId, market, eventGroups);
@@ -142,7 +148,7 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
 
     // Sort by mispricing score (best first)
     signals.sort((a, b) => b.confidence * b.edge - a.confidence * a.edge);
-    return signals.slice(0, MAX_POSITIONS - this.positions.length);
+    return signals.slice(0, Math.max(0, MAX_POSITIONS - walletOpen.length));
   }
 
   /* ── Sizing: risk-adjusted with Kelly ───────────────────────── */
@@ -198,6 +204,16 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
   override notifyFill(order: OrderRequest): void {
     super.notifyFill(order);
     if (order.strategy !== this.name) return;
+
+    // Keep at most one tracked record per market/outcome; wallet state is the source of truth for size.
+    const existing = this.positions.find((p) => p.marketId === order.marketId && p.outcome === order.outcome);
+    if (existing) {
+      existing.entryPrice = order.price;
+      existing.entryTime = Date.now();
+      existing.peakBps = 0;
+      return;
+    }
+
     this.positions.push({
       marketId: order.marketId,
       outcome: order.outcome,
@@ -217,6 +233,8 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
 
   /* ── Manage positions ───────────────────────────────────────── */
   override managePositions(): void {
+    this.syncTrackedPositionsFromWallet();
+
     const toRemove: number[] = [];
 
     for (let i = 0; i < this.positions.length; i++) {
@@ -260,14 +278,13 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
         toRemove.push(i);
 
         const exitSide: 'BUY' | 'SELL' = pos.side === 'BUY' ? 'SELL' : 'BUY';
-        this.pendingExits.push({
-          walletId: this.context?.wallet.walletId ?? 'unknown',
+        this.queueExitOrder({
           marketId: pos.marketId,
           outcome: pos.outcome,
           side: exitSide,
           price: currentPrice,
           size: pos.size,
-          strategy: this.name,
+          rawReason: exitReason,
         });
       }
     }
@@ -326,6 +343,31 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
       sumVol += volDelta;
     }
     return sumVol > 0 ? sumPriceVol / sumVol : 0;
+  }
+
+  private syncTrackedPositionsFromWallet(): void {
+    const walletPositions = this.context?.wallet.openPositions ?? [];
+    const now = Date.now();
+    const existingKeys = new Set(this.positions.map((p) => `${p.marketId}:${p.outcome}`));
+
+    for (const wp of walletPositions) {
+      const key = `${wp.marketId}:${wp.outcome}`;
+      if (existingKeys.has(key)) continue;
+      this.positions.push({
+        marketId: wp.marketId,
+        outcome: wp.outcome,
+        side: 'BUY',
+        entryPrice: wp.avgPrice,
+        size: wp.size,
+        entryTime: now,
+        mispricingScore: 0,
+        peakBps: 0,
+      });
+      existingKeys.add(key);
+    }
+
+    const walletKeys = new Set(walletPositions.map((p) => `${p.marketId}:${p.outcome}`));
+    this.positions = this.positions.filter((p) => walletKeys.has(`${p.marketId}:${p.outcome}`));
   }
 
   private volumePriceDivergence(marketId: string): number {

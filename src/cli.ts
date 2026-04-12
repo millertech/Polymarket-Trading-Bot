@@ -2,9 +2,10 @@ import 'dotenv/config';
 import { Command } from 'commander';
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import YAML from 'yaml';
 import { loadConfig } from './core/config_loader';
-import { WalletManager, WalletRuntimeSnapshot } from './wallets/wallet_manager';
+import { WalletManager, WalletRuntimeSnapshot, type StartupReconciliationReport } from './wallets/wallet_manager';
 import { KillSwitch } from './risk/kill_switch';
 import { RiskEngine } from './risk/risk_engine';
 import { TradeExecutor } from './execution/trade_executor';
@@ -198,6 +199,18 @@ function shouldClearWalletRuntimeOnStart(enableLiveTrading: boolean): boolean {
   return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
 }
 
+function shouldBlockOnRedReconciliation(): boolean {
+  const raw = process.env.BLOCK_ON_RED_RECONCILIATION;
+  if (!raw) return true;
+  return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
+}
+
+function shouldBlockOnPendingUnresolvedQueue(): boolean {
+  const raw = process.env.BLOCK_ON_PENDING_UNRESOLVED_QUEUE;
+  if (!raw) return true;
+  return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
+}
+
 program
   .name('bot')
   .description('Polymarket multi-strategy trading platform')
@@ -278,8 +291,60 @@ program
       }
     }
 
+    let startupReconciliationReport: StartupReconciliationReport | null = null;
+
     if (config.environment.enableLiveTrading) {
       await walletManager.runLivePreflight();
+
+      const previousSyncCursors = Array.from(walletManager.getWalletsMap().entries())
+        .filter(([, wallet]) => wallet.getState().mode === 'LIVE')
+        .map(([walletId]) => ({ walletId, cursor: runtimeDb.loadWalletSyncCursor(walletId)?.cursor ?? null }));
+
+      const reconciliationReport = await walletManager.runStartupReconciliation({
+        getLedgerOpenPositionCount: (walletId) => runtimeDb.loadLedgerOpenPositionCount(walletId),
+        getLedgerFillCount: (walletId) => runtimeDb.loadExecutionFillCount(walletId),
+      });
+      startupReconciliationReport = reconciliationReport;
+      runtimeDb.saveReconciliationReport(reconciliationReport);
+      runtimeDb.enqueueUnresolvedOrderItems(
+        reconciliationReport.wallets
+          .filter((wallet) => wallet.mode === 'LIVE' && (wallet.exchangeOpenOrders ?? 0) > wallet.localOpenPositions)
+          .flatMap((wallet) => {
+            const orderIds = wallet.exchangeOpenOrderIds ?? [];
+            if (orderIds.length > 0) {
+              return orderIds.map((exchangeOrderId) => ({
+                walletId: wallet.walletId,
+                exchangeOrderId,
+                reason: 'exchange open orders exceed local open positions at startup reconciliation',
+                source: 'startup_reconcile' as const,
+              }));
+            }
+            return [{
+              walletId: wallet.walletId,
+              reason: 'exchange open orders exceed local open positions at startup reconciliation',
+              source: 'startup_reconcile' as const,
+            }];
+          }),
+      );
+      for (const wallet of reconciliationReport.wallets) {
+        if (wallet.mode !== 'LIVE') continue;
+        runtimeDb.saveWalletSyncCursor(wallet.walletId, reconciliationReport.completedAt, 'startup_reconciliation');
+      }
+      runtimeDb.appendAuditEvent({
+        event_type: `startup_reconciliation_${reconciliationReport.status}`,
+        actor: 'system',
+        details: {
+          summary: reconciliationReport.summary,
+          startedAt: reconciliationReport.startedAt,
+          completedAt: reconciliationReport.completedAt,
+          previousSyncCursors,
+        },
+      });
+
+      if (reconciliationReport.status === 'red' && shouldBlockOnRedReconciliation()) {
+        killSwitch.setState(true);
+        throw new Error('Startup reconciliation returned RED status; blocking live startup and activating kill switch');
+      }
     }
 
     const dashboardPort = Number(process.env.DASHBOARD_PORT ?? 3000);
@@ -308,11 +373,92 @@ program
     dashboardServer.start();
     dashboardServer.setDatabase(runtimeDb);
     const riskEngine = new RiskEngine(killSwitch);
-    const orderRouter = new OrderRouter(walletManager, riskEngine, new TradeExecutor());
+    const strategyRunId = randomUUID();
+    const orderRouter = new OrderRouter(walletManager, riskEngine, new TradeExecutor(), runtimeDb, strategyRunId);
 
-    const engine = new Engine(config, walletManager, orderRouter);
+    const engine = new Engine(config, walletManager, orderRouter, runtimeDb);
     await engine.initialize();
     dashboardServer.setEngine(engine);
+
+    if (config.environment.enableLiveTrading) {
+      const pendingPositionQueue = runtimeDb.loadPendingUnresolvedWorkQueue();
+      const pendingOrderQueue = runtimeDb.loadPendingUnresolvedOrderQueue();
+      if (pendingPositionQueue.length > 0 || pendingOrderQueue.length > 0) {
+        runtimeDb.appendAuditEvent({
+          event_type: 'unresolved_queue_resume_started',
+          actor: 'system',
+          details: {
+            pendingPositionCount: pendingPositionQueue.length,
+            pendingOrderCount: pendingOrderQueue.length,
+          },
+        });
+
+        let attempted = 0;
+        let succeeded = 0;
+        let unresolvedCount = 0;
+        let resolvedQueueItems = 0;
+        let pendingQueueItems = pendingPositionQueue.length;
+
+        if (pendingPositionQueue.length > 0) {
+          const result = await engine.closeAllPositions('startup unresolved queue drain');
+          const queueResult = runtimeDb.recordUnresolvedWorkQueueAttempt(result.unresolved);
+          attempted = result.attempted;
+          succeeded = result.succeeded;
+          unresolvedCount = result.unresolvedCount;
+          resolvedQueueItems = queueResult.resolved;
+          pendingQueueItems = queueResult.pending;
+        }
+
+        let resolvedOrderQueueItems = 0;
+        let pendingOrderQueueItems = pendingOrderQueue.length;
+        if (pendingOrderQueue.length > 0) {
+          const postDrainReconciliation = await walletManager.runStartupReconciliation({
+            getLedgerOpenPositionCount: (walletId) => runtimeDb.loadLedgerOpenPositionCount(walletId),
+            getLedgerFillCount: (walletId) => runtimeDb.loadExecutionFillCount(walletId),
+          });
+          startupReconciliationReport = postDrainReconciliation;
+          runtimeDb.saveReconciliationReport(postDrainReconciliation);
+
+          const stillOpenOrders = postDrainReconciliation.wallets
+            .filter((wallet) => wallet.mode === 'LIVE' && (wallet.exchangeOpenOrders ?? 0) > 0)
+            .flatMap((wallet) => {
+              const ids = wallet.exchangeOpenOrderIds ?? [];
+              if (ids.length > 0) {
+                return ids.map((exchangeOrderId) => ({
+                  walletId: wallet.walletId,
+                  exchangeOrderId,
+                }));
+              }
+              return [{ walletId: wallet.walletId }];
+            });
+          const orderQueueResult = runtimeDb.recordUnresolvedOrderQueueAttempt(stillOpenOrders);
+          resolvedOrderQueueItems = orderQueueResult.resolved;
+          pendingOrderQueueItems = orderQueueResult.pending;
+        }
+
+        runtimeDb.appendAuditEvent({
+          event_type: 'unresolved_queue_resume_completed',
+          actor: 'system',
+          details: {
+            attempted,
+            succeeded,
+            unresolvedCount,
+            resolvedQueueItems,
+            pendingQueueItems,
+            resolvedOrderQueueItems,
+            pendingOrderQueueItems,
+          },
+        });
+
+        if ((pendingQueueItems > 0 || pendingOrderQueueItems > 0) && shouldBlockOnPendingUnresolvedQueue()) {
+          killSwitch.setState(true);
+          throw new Error(
+            `Startup unresolved queue drain incomplete (positions=${pendingQueueItems}, orders=${pendingOrderQueueItems}); blocking live startup and activating kill switch`,
+          );
+        }
+      }
+    }
+
     engine.start();
 
     // Wire kill-switch → emergency close: when the kill switch activates, attempt
@@ -320,11 +466,17 @@ program
     // block the caller (e.g. the dashboard POST handler).
     killSwitch.onChange((enabled) => {
       if (!enabled) return;
-      void engine.closeAllPositions('kill-switch activated').then(({ attempted, succeeded }) => {
+      void engine.closeAllPositions('kill-switch activated').then(({ attempted, succeeded, unresolvedCount, unresolved }) => {
         runtimeDb.appendAuditEvent({
           event_type: 'emergency_close',
           actor: 'kill_switch',
-          details: { attempted, succeeded, reason: 'kill-switch activated' },
+          details: {
+            attempted,
+            succeeded,
+            unresolvedCount,
+            unresolved,
+            reason: 'kill-switch activated',
+          },
         });
       }).catch((err) => {
         logger.error({ err: String(err) }, 'Emergency closeAllPositions threw unexpectedly');

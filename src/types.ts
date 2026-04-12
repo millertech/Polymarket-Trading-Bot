@@ -38,6 +38,14 @@ export interface AppConfig {
 
 export type OrderSide = 'BUY' | 'SELL';
 export type OrderOutcome = 'YES' | 'NO';
+export type OrderExitReason =
+  | 'take_profit'
+  | 'stop_loss'
+  | 'max_hold'
+  | 'stale_market'
+  | 'kill_switch'
+  | 'drawdown_breaker'
+  | 'manual';
 
 export interface OrderRequest {
   walletId: string;
@@ -49,6 +57,8 @@ export interface OrderRequest {
   price: number;
   size: number;
   strategy: string;
+  exitReason?: OrderExitReason;
+  exitPolicyBranch?: string;
 }
 
 export interface OrderFill {

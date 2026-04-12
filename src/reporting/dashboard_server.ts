@@ -1,6 +1,7 @@
 import http from 'http';
 import { WalletManager } from '../wallets/wallet_manager';
 import { buildDashboardPayload } from './dashboard_api';
+import { attachReconciliationToPayload } from './dashboard_api';
 import { logger } from './logs';
 import { recordDashboardApiRateLimited, recordDashboardApiRequest } from './runtime_counters';
 import {
@@ -180,7 +181,8 @@ export class DashboardServer {
         this.engine?.getPausedWallets(),
         this.walletDisplayNames,
       );
-      const data = `event: dashboard\ndata: ${JSON.stringify(payload)}\n\n`;
+      const withRecon = attachReconciliationToPayload(payload, this.db?.loadLatestReconciliationReport() ?? null);
+      const data = `event: dashboard\ndata: ${JSON.stringify(withRecon)}\n\n`;
       for (const client of this.sseClients) {
         try {
           client.write(data);
@@ -228,6 +230,7 @@ export class DashboardServer {
       walletManager: this.walletManager,
       walletDisplayNames: this.walletDisplayNames,
       engine: this.engine,
+      db: this.db,
       getLiveMarketPrices: () => this.getLiveMarketPrices(),
       runKillSwitch: async () => {
         this.killSwitch?.activate();

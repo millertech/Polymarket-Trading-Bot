@@ -304,14 +304,13 @@ export class UserDefinedStrategy extends BaseStrategy {
       if (exitReason) {
         toRemove.push(i);
         const exitSide: 'BUY' | 'SELL' = pos.side === 'BUY' ? 'SELL' : 'BUY';
-        this.pendingExits.push({
-          walletId: this.context?.wallet.walletId ?? 'unknown',
+        this.queueExitOrder({
           marketId: pos.marketId,
           outcome: pos.outcome,
           side: exitSide,
           price: currentPrice,
           size: pos.size,
-          strategy: this.name,
+          rawReason: exitReason,
         });
       }
     }

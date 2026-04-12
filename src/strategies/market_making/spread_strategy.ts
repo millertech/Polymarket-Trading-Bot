@@ -241,14 +241,13 @@ export class SpreadStrategy extends BaseStrategy {
           `MM: exiting inventory — ${exitReason}`,
         );
 
-        this.pendingExits.push({
-          walletId,
+        this.queueExitOrder({
           marketId,
           outcome: 'YES',
           side: 'SELL',
-          price: Number(Math.max(0.02, currentAsk - 0.002).toFixed(4)), // hit the bid aggressively
+          price: Number(Math.max(0.02, currentAsk - 0.002).toFixed(4)),
           size: exitSize,
-          strategy: this.name,
+          rawReason: exitReason,
         });
 
         // Update local inventory tracking immediately

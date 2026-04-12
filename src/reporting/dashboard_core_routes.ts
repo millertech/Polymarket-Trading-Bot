@@ -1,15 +1,17 @@
 import http from 'http';
-import { buildDashboardPayload } from './dashboard_api';
+import { attachReconciliationToPayload, buildDashboardPayload } from './dashboard_api';
 import { buildDashboardHtmlHeaders } from './dashboard_http';
 import { getRuntimeCountersSnapshot } from './runtime_counters';
 import { getDashboardHtml } from './dashboard_template';
 import { WalletManager } from '../wallets/wallet_manager';
 import type { Engine } from '../core/engine';
+import type { Database } from '../storage/database';
 
 export type DashboardCoreRouteDeps = {
   walletManager: WalletManager;
   walletDisplayNames: Map<string, string>;
   engine?: Engine;
+  db?: Database;
   getLiveMarketPrices: () => Map<string, number>;
   runKillSwitch: () => Promise<{
     ok: boolean;
@@ -31,6 +33,7 @@ export async function handleDashboardCoreRoutes(
     walletManager,
     walletDisplayNames,
     engine,
+    db,
     getLiveMarketPrices,
     runKillSwitch,
     json,
@@ -43,13 +46,15 @@ export async function handleDashboardCoreRoutes(
   }
 
   if (path === '/api/data' && method === 'GET') {
-    json(res, 200, buildDashboardPayload(
+    const payload = buildDashboardPayload(
       walletManager.listWallets(),
       walletManager.getAllTradeHistories(),
       getLiveMarketPrices(),
       engine?.getPausedWallets(),
       walletDisplayNames,
-    ));
+    );
+    const withRecon = attachReconciliationToPayload(payload, db?.loadLatestReconciliationReport() ?? null);
+    json(res, 200, withRecon);
     return true;
   }
 

@@ -18,10 +18,10 @@ wallets:
     strategy: mispricing_arbitrage
     capital: 100
     risk_limits:
-      max_position_size: 5
-      max_exposure_per_market: 15      # ~30% of $50 capital
-      max_daily_loss: 10               # 20% of $50 capital
-      max_open_trades: 30
+      max_position_size: 3
+      max_exposure_per_market: 8       # keep single-market concentration low in LIVE mode
+      max_daily_loss: 8
+      max_open_trades: 8
       max_drawdown: 0.15
 
   - id: paper_longshot_hunter

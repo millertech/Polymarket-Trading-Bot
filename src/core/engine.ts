@@ -7,6 +7,7 @@ import { STRATEGY_REGISTRY } from '../strategies/registry';
 import { AppConfig, MarketData } from '../types';
 import { logger } from '../reporting/logs';
 import { consoleLog } from '../reporting/console_log';
+import type { Database, ExitReason } from '../storage/database';
 
 interface StrategyRunner {
   strategy: StrategyInterface;
@@ -19,11 +20,20 @@ export class Engine {
   private readonly stream: OrderbookStream;
   private readonly runners: StrategyRunner[] = [];
   private readonly pausedWallets = new Set<string>();
+  private readonly exitCompletionMaxRetries = Math.max(
+    0,
+    Number(process.env.EXIT_COMPLETION_MAX_RETRIES ?? '3'),
+  );
+  private readonly exitCompletionRetryDelayMs = Math.max(
+    500,
+    Number(process.env.EXIT_COMPLETION_RETRY_DELAY_MS ?? '2000'),
+  );
 
   constructor(
     private readonly config: AppConfig,
     private readonly walletManager: WalletManager,
     private readonly orderRouter: OrderRouter,
+    private readonly database?: Database,
   ) {
     // Pass Gamma API URL from config to the OrderbookStream
     this.stream = new OrderbookStream(config.polymarket.gammaApi);
@@ -86,56 +96,137 @@ export class Engine {
    * Bypasses the risk engine (which would block orders while kill switch is active).
    * Returns counts of attempted and succeeded SELL submissions.
    *
+   * After initial close attempts, retries remaining open positions up to
+   * EXIT_COMPLETION_MAX_RETRIES times with EXIT_COMPLETION_RETRY_DELAY_MS delay.
+   * Any position still open after all retries is written as 'exit_failed' in the
+   * position_lifecycle table and returned as unresolved.
+   *
    * Note: Positions are based on the bot's internal position tracking, not fetched
    * from chain.  For live wallets this submits SELL limit orders at the last known
    * market price; fills are contingent on available CLOB liquidity.
    */
-  async closeAllPositions(reason: string): Promise<{ attempted: number; succeeded: number }> {
+  async closeAllPositions(reason: string, exitReason: ExitReason = 'emergency_close'): Promise<{
+    attempted: number;
+    succeeded: number;
+    unresolvedCount: number;
+    unresolved: Array<{ walletId: string; marketId: string; outcome: 'YES' | 'NO'; size: number }>;
+  }> {
     let attempted = 0;
     let succeeded = 0;
 
     consoleLog.warn('ENGINE', `Emergency close all positions triggered — reason: ${reason}`);
     logger.warn({ reason }, 'closeAllPositions: starting emergency position close');
 
-    for (const [walletId, wallet] of this.walletManager.getWalletsMap()) {
-      const state = wallet.getState();
-      const positions = state.openPositions;
+    const submitCloseOrders = async (): Promise<void> => {
+      for (const [walletId, wallet] of this.walletManager.getWalletsMap()) {
+        const state = wallet.getState();
+        const positions = state.openPositions;
+        if (positions.length === 0) continue;
 
-      if (positions.length === 0) continue;
+        for (const pos of positions) {
+          // Look up last known market price from the stream cache
+          const market = this.stream.getMarket(pos.marketId);
+          const price = market
+            ? (pos.outcome === 'YES'
+                ? market.outcomePrices[0]
+                : (market.outcomePrices[1] ?? 1 - market.outcomePrices[0]))
+            : pos.avgPrice;
+          const safePrice = Number(Math.max(0.01, Math.min(0.99, price)).toFixed(4));
 
-      for (const pos of positions) {
-        // Look up last known market price from the stream cache
-        const market = this.stream.getMarket(pos.marketId);
-        const price = market
-          ? (pos.outcome === 'YES'
-              ? market.outcomePrices[0]
-              : (market.outcomePrices[1] ?? 1 - market.outcomePrices[0]))
-          : pos.avgPrice;
-        const safePrice = Number(Math.max(0.01, Math.min(0.99, price)).toFixed(4));
-
-        attempted++;
-        try {
-          await wallet.placeOrder({
-            marketId: pos.marketId,
-            outcome: pos.outcome,
-            side: 'SELL',
-            price: safePrice,
-            size: Math.abs(pos.size),
-          });
-          succeeded++;
-          consoleLog.success('ENGINE', `Emergency close: ${walletId} SELL ${pos.outcome} ×${pos.size} @ ${safePrice} [${pos.marketId.slice(0, 12)}…]`);
-          logger.info({ walletId, marketId: pos.marketId, outcome: pos.outcome, size: pos.size, price: safePrice, reason }, 'Emergency position closed');
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          consoleLog.error('ENGINE', `Emergency close failed: ${walletId} ${pos.marketId.slice(0, 12)}… — ${msg}`);
-          logger.error({ walletId, marketId: pos.marketId, err: msg, reason }, 'Emergency close order failed');
+          attempted++;
+          try {
+            await wallet.placeOrder({
+              marketId: pos.marketId,
+              outcome: pos.outcome,
+              side: 'SELL',
+              price: safePrice,
+              size: Math.abs(pos.size),
+            });
+            succeeded++;
+            const parentIntentId = this.database?.loadActiveEntryIntentId(walletId, pos.marketId, pos.outcome);
+            this.database?.appendPositionLifecycle({
+              parent_intent_id: parentIntentId,
+              wallet_id: walletId,
+              market_id: pos.marketId,
+              outcome: pos.outcome,
+              event_type: 'flat',
+              size: Math.abs(pos.size),
+              price: safePrice,
+              exit_reason: exitReason,
+              notes: reason,
+            });
+            consoleLog.success('ENGINE', `Emergency close: ${walletId} SELL ${pos.outcome} ×${pos.size} @ ${safePrice} [${pos.marketId.slice(0, 12)}…]`);
+            logger.info({ walletId, marketId: pos.marketId, outcome: pos.outcome, size: pos.size, price: safePrice, reason }, 'Emergency position closed');
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            consoleLog.error('ENGINE', `Emergency close failed: ${walletId} ${pos.marketId.slice(0, 12)}… — ${msg}`);
+            logger.error({ walletId, marketId: pos.marketId, err: msg, reason }, 'Emergency close order failed');
+          }
         }
       }
+    };
+
+    // Initial close pass
+    await submitCloseOrders();
+
+    // Retry loop: poll remaining open positions and resubmit
+    for (let attempt = 1; attempt <= this.exitCompletionMaxRetries; attempt++) {
+      const remaining = this.collectOpenPositions();
+      if (remaining.length === 0) break;
+      consoleLog.warn('ENGINE', `Exit retry ${attempt}/${this.exitCompletionMaxRetries}: ${remaining.length} positions still open — waiting ${this.exitCompletionRetryDelayMs}ms before retry`);
+      await new Promise<void>((resolve) => setTimeout(resolve, this.exitCompletionRetryDelayMs));
+      await submitCloseOrders();
     }
 
-    consoleLog.warn('ENGINE', `Emergency close complete — ${succeeded}/${attempted} positions closed`);
-    logger.warn({ reason, attempted, succeeded }, 'closeAllPositions: complete');
-    return { attempted, succeeded };
+    const unresolved = this.collectOpenPositions();
+    const unresolvedCount = unresolved.length;
+
+    // Write exit_failed lifecycle entries for any positions that remain open.
+    for (const pos of unresolved) {
+      const parentIntentId = this.database?.loadActiveEntryIntentId(pos.walletId, pos.marketId, pos.outcome);
+      this.database?.appendPositionLifecycle({
+        parent_intent_id: parentIntentId,
+        wallet_id: pos.walletId,
+        market_id: pos.marketId,
+        outcome: pos.outcome,
+        event_type: 'exit_failed',
+        size: pos.size,
+        price: 0,
+        exit_reason: exitReason,
+        notes: `Unresolved after ${this.exitCompletionMaxRetries} retries — ${reason}`,
+      });
+    }
+    this.database?.enqueueUnresolvedWorkItems(
+      unresolved.map((pos) => ({
+        walletId: pos.walletId,
+        marketId: pos.marketId,
+        outcome: pos.outcome,
+        size: pos.size,
+        reason,
+        source: 'emergency_close' as const,
+      })),
+    );
+
+    if (unresolvedCount > 0) {
+      consoleLog.error('ENGINE', `Emergency close completed with ${unresolvedCount} unresolved positions`, { unresolvedCount });
+    } else {
+      consoleLog.warn('ENGINE', `Emergency close complete — ${succeeded}/${attempted} positions closed`);
+    }
+
+    logger.warn({ reason, attempted, succeeded, unresolvedCount }, 'closeAllPositions: complete');
+    return { attempted, succeeded, unresolvedCount, unresolved };
+  }
+
+  private collectOpenPositions(): Array<{ walletId: string; marketId: string; outcome: 'YES' | 'NO'; size: number }> {
+    const result: Array<{ walletId: string; marketId: string; outcome: 'YES' | 'NO'; size: number }> = [];
+    for (const [walletId, wallet] of this.walletManager.getWalletsMap()) {
+      const state = wallet.getState();
+      for (const pos of state.openPositions) {
+        if (pos.size <= 0) continue;
+        result.push({ walletId, marketId: pos.marketId, outcome: pos.outcome, size: pos.size });
+      }
+    }
+    return result;
   }
 
   /** Expose the stream so the dashboard can query live market data */

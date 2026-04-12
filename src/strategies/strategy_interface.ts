@@ -1,4 +1,4 @@
-import { MarketData, OrderRequest, Signal, WalletState } from '../types';
+import { MarketData, OrderRequest, Signal, WalletState, type OrderExitReason } from '../types';
 
 export interface StrategyContext {
   wallet: WalletState;
@@ -118,6 +118,52 @@ export abstract class BaseStrategy implements StrategyInterface {
     const exits = this.pendingExits;
     this.pendingExits = [];
     return exits;
+  }
+
+  protected queueExitOrder(input: {
+    marketId: string;
+    outcome: 'YES' | 'NO';
+    side: 'BUY' | 'SELL';
+    price: number;
+    size: number;
+    rawReason: string;
+  }): void {
+    const walletId = this.context?.wallet.walletId ?? 'unknown';
+    const mapped = this.standardizeExitReason(input.rawReason);
+    this.pendingExits.push({
+      walletId,
+      marketId: input.marketId,
+      outcome: input.outcome,
+      side: input.side,
+      price: input.price,
+      size: input.size,
+      strategy: this.name,
+      exitReason: mapped.exitReason,
+      exitPolicyBranch: mapped.exitPolicyBranch,
+    });
+  }
+
+  protected standardizeExitReason(rawReason: string): { exitReason: OrderExitReason; exitPolicyBranch: string } {
+    const normalized = rawReason.trim().toUpperCase();
+    if (normalized.includes('KILL')) {
+      return { exitReason: 'kill_switch', exitPolicyBranch: rawReason };
+    }
+    if (normalized.includes('DRAWDOWN')) {
+      return { exitReason: 'drawdown_breaker', exitPolicyBranch: rawReason };
+    }
+    if (normalized.includes('TP') || normalized.includes('TAKE_PROFIT') || normalized.includes('TRAIL')) {
+      return { exitReason: 'take_profit', exitPolicyBranch: rawReason };
+    }
+    if (normalized.includes('SL') || normalized.includes('STOP_LOSS') || normalized.includes('ADVERSE')) {
+      return { exitReason: 'stop_loss', exitPolicyBranch: rawReason };
+    }
+    if (normalized.includes('TIME') || normalized.includes('MAX_HOLD')) {
+      return { exitReason: 'max_hold', exitPolicyBranch: rawReason };
+    }
+    if (normalized.includes('MANUAL')) {
+      return { exitReason: 'manual', exitPolicyBranch: rawReason };
+    }
+    return { exitReason: 'stale_market', exitPolicyBranch: rawReason };
   }
 
   shutdown(): void {

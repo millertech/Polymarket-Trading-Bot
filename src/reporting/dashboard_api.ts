@@ -1,4 +1,5 @@
 import { WalletState, TradeRecord } from '../types';
+import type { ReconciliationReport } from '../storage/database';
 
 export interface PerformanceSnapshot {
   walletId: string;
@@ -42,6 +43,8 @@ export interface WalletDashboardEntry {
     maxDrawdown: number;
   };
   performance: PerformanceSnapshot;
+  reconciliationStatus?: 'green' | 'yellow' | 'red';
+  reconciliationNotes?: string[];
 }
 
 export interface DashboardPayload {
@@ -52,6 +55,13 @@ export interface DashboardPayload {
   totalUnrealizedPnl: number;
   activeWallets: number;
   wallets: WalletDashboardEntry[];
+  reconciliation?: {
+    status: 'green' | 'yellow' | 'red';
+    completedAt: string;
+    redWallets: number;
+    yellowWallets: number;
+    greenWallets: number;
+  };
 }
 
 export function computePerformance(
@@ -156,5 +166,35 @@ export function buildDashboardPayload(
     totalUnrealizedPnl: Number(totalUnrealizedPnl.toFixed(4)),
     activeWallets: entries.length,
     wallets: entries,
+  };
+}
+
+export function attachReconciliationToPayload(
+  payload: DashboardPayload,
+  report: ReconciliationReport | null,
+): DashboardPayload {
+  if (!report) return payload;
+
+  const statusMap = new Map(report.wallets.map((w) => [w.walletId, w]));
+  const wallets = payload.wallets.map((wallet) => {
+    const match = statusMap.get(wallet.walletId);
+    if (!match) return wallet;
+    return {
+      ...wallet,
+      reconciliationStatus: match.status,
+      reconciliationNotes: match.notes,
+    };
+  });
+
+  return {
+    ...payload,
+    wallets,
+    reconciliation: {
+      status: report.status,
+      completedAt: report.completedAt,
+      redWallets: report.summary.redWallets,
+      yellowWallets: report.summary.yellowWallets,
+      greenWallets: report.summary.greenWallets,
+    },
   };
 }

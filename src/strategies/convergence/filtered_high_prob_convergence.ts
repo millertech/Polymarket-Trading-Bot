@@ -419,14 +419,13 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
         this.weeklyPnl += pnl;
 
         /* Queue a SELL order so the wallet records the realized PnL */
-        this.pendingExits.push({
-          walletId: this.context?.wallet.walletId ?? 'unknown',
+        this.queueExitOrder({
           marketId: pos.marketId,
           outcome: pos.outcome,
           side: 'SELL',
           price: currentMid,
           size: pos.size,
-          strategy: this.name,
+          rawReason: exitReason,
         });
 
         /* Update cluster exposure */
@@ -462,14 +461,13 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
       this.weeklyPnl += pnl;
 
       /* Queue a partial SELL order through the wallet */
-      this.pendingExits.push({
-        walletId: this.context?.wallet.walletId ?? 'unknown',
+      this.queueExitOrder({
         marketId: pos.marketId,
         outcome: pos.outcome,
         side: 'SELL',
         price: sellPrice,
         size: actualSell,
-        strategy: this.name,
+        rawReason: reason,
       });
 
       logger.info(

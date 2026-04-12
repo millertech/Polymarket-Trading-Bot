@@ -3,6 +3,42 @@ import { PolymarketWallet } from './polymarket_wallet';
 import { WalletState, WalletConfig, TradeRecord } from '../types';
 import { logger } from '../reporting/logs';
 
+export interface LiveWalletReconciliationResult {
+  status: 'green' | 'yellow' | 'red';
+  exchangeOpenOrders?: number;
+  exchangeOpenOrderIds?: string[];
+  exchangeRecentFills?: number;
+  exchangeBalanceUsd?: number;
+  notes: string[];
+}
+
+export interface StartupReconciliationReport {
+  status: 'green' | 'yellow' | 'red';
+  startedAt: string;
+  completedAt: string;
+  wallets: Array<{
+    walletId: string;
+    mode: 'LIVE' | 'PAPER';
+    status: 'green' | 'yellow' | 'red';
+    localOpenPositions: number;
+    localTrades: number;
+    ledgerOpenPositions?: number;
+    ledgerFills?: number;
+    exchangeOpenOrders?: number;
+    exchangeOpenOrderIds?: string[];
+    exchangeRecentFills?: number;
+    exchangeBalanceUsd?: number;
+    notes: string[];
+  }>;
+  summary: {
+    totalWallets: number;
+    liveWallets: number;
+    redWallets: number;
+    yellowWallets: number;
+    greenWallets: number;
+  };
+}
+
 export interface ExecutionWallet {
   getState(): WalletState;
   getTradeHistory(): TradeRecord[];
@@ -22,6 +58,8 @@ export interface ExecutionWallet {
   updateRiskLimits?(limits: Partial<import('../types').RiskLimits>): void;
   /** Optional startup preflight for LIVE trading reachability / restrictions */
   preflightLiveAccess?(): Promise<{ ok: boolean; reason?: string; details?: Record<string, unknown> }>;
+  /** Optional startup reconciliation for LIVE wallet state vs exchange view. */
+  reconcileLiveState?(): Promise<LiveWalletReconciliationResult>;
   /** Optional runtime state rehydration (used on bot restart) */
   rehydrateRuntimeState?(snapshot: {
     state: WalletState;
@@ -184,6 +222,134 @@ export class WalletManager {
         .join('; ');
       throw new Error(`LIVE preflight failed for ${failures.length} wallet(s): ${summary}`);
     }
+  }
+
+  async runStartupReconciliation(ledger?: {
+    getLedgerOpenPositionCount?: (walletId: string) => number;
+    getLedgerFillCount?: (walletId: string) => number;
+  }): Promise<StartupReconciliationReport> {
+    const startedAt = new Date().toISOString();
+    const wallets = this.listWallets();
+    const walletReports: StartupReconciliationReport['wallets'] = [];
+
+    for (const walletState of wallets) {
+      const wallet = this.wallets.get(walletState.walletId);
+      if (!wallet) continue;
+
+      const ledgerOpenPositions = ledger?.getLedgerOpenPositionCount?.(walletState.walletId);
+      const ledgerFills = ledger?.getLedgerFillCount?.(walletState.walletId);
+
+      if (walletState.mode !== 'LIVE') {
+        walletReports.push({
+          walletId: walletState.walletId,
+          mode: walletState.mode,
+          status: 'green',
+          localOpenPositions: walletState.openPositions.length,
+          localTrades: wallet.getTradeHistory().length,
+          ledgerOpenPositions,
+          ledgerFills,
+          notes: ['paper wallet: reconciliation not required'],
+        });
+        continue;
+      }
+
+      const localOpenPositions = walletState.openPositions.length;
+      const localTrades = wallet.getTradeHistory().length;
+
+      if (!wallet.reconcileLiveState) {
+        walletReports.push({
+          walletId: walletState.walletId,
+          mode: walletState.mode,
+          status: 'red',
+          localOpenPositions,
+          localTrades,
+          notes: ['live wallet does not implement reconcileLiveState'],
+        });
+        continue;
+      }
+
+      try {
+        const result = await wallet.reconcileLiveState();
+        const notes = [...result.notes];
+        let status = result.status;
+
+        if (typeof ledgerFills === 'number' && Math.abs(localTrades - ledgerFills) > 0) {
+          notes.push(`ledger/runtime trade drift: local=${localTrades}, ledger=${ledgerFills}`);
+          if (Math.abs(localTrades - ledgerFills) >= 3) {
+            status = 'red';
+          } else if (status === 'green') {
+            status = 'yellow';
+          }
+        }
+
+        if (typeof ledgerOpenPositions === 'number' && Math.abs(localOpenPositions - ledgerOpenPositions) > 0) {
+          notes.push(`ledger/runtime open-position drift: local=${localOpenPositions}, ledger=${ledgerOpenPositions}`);
+          if (Math.abs(localOpenPositions - ledgerOpenPositions) >= 2) {
+            status = 'red';
+          } else if (status === 'green') {
+            status = 'yellow';
+          }
+        }
+
+        walletReports.push({
+          walletId: walletState.walletId,
+          mode: walletState.mode,
+          status,
+          localOpenPositions,
+          localTrades,
+          ledgerOpenPositions,
+          ledgerFills,
+          exchangeOpenOrders: result.exchangeOpenOrders,
+          exchangeOpenOrderIds: result.exchangeOpenOrderIds,
+          exchangeBalanceUsd: result.exchangeBalanceUsd,
+          exchangeRecentFills: result.exchangeRecentFills,
+          notes,
+        });
+      } catch (error) {
+        walletReports.push({
+          walletId: walletState.walletId,
+          mode: walletState.mode,
+          status: 'red',
+          localOpenPositions,
+          localTrades,
+          ledgerOpenPositions,
+          ledgerFills,
+          notes: [`reconciliation failed: ${error instanceof Error ? error.message : String(error)}`],
+        });
+      }
+    }
+
+    const summary = {
+      totalWallets: walletReports.length,
+      liveWallets: walletReports.filter((r) => r.mode === 'LIVE').length,
+      redWallets: walletReports.filter((r) => r.status === 'red').length,
+      yellowWallets: walletReports.filter((r) => r.status === 'yellow').length,
+      greenWallets: walletReports.filter((r) => r.status === 'green').length,
+    };
+
+    const status: StartupReconciliationReport['status'] =
+      summary.redWallets > 0 ? 'red' : summary.yellowWallets > 0 ? 'yellow' : 'green';
+
+    const report: StartupReconciliationReport = {
+      status,
+      startedAt,
+      completedAt: new Date().toISOString(),
+      wallets: walletReports,
+      summary,
+    };
+
+    logger.info(
+      {
+        status: report.status,
+        totalWallets: summary.totalWallets,
+        liveWallets: summary.liveWallets,
+        redWallets: summary.redWallets,
+        yellowWallets: summary.yellowWallets,
+      },
+      'Startup reconciliation complete',
+    );
+
+    return report;
   }
 
   createRuntimeSnapshot(): WalletRuntimeSnapshot {

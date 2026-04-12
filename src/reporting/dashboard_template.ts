@@ -433,6 +433,13 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
 <div class="tab-pane active" id="pane-dashboard">
   <div class="summary-row" id="summary"></div>
   <div class="summary-row" id="execution-health"></div>
+  <div id="recon-panel" style="display:none;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:16px 20px;margin-bottom:16px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <div style="font-size:13px;font-weight:700;color:var(--fg);letter-spacing:.3px">Reconciliation Details</div>
+      <button onclick="toggleReconciliationPanel()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px;line-height:1;padding:0 4px">&times;</button>
+    </div>
+    <div id="recon-panel-content"></div>
+  </div>
   <div class="wallet-grid" id="wallets"></div>
 </div>
 
@@ -1153,13 +1160,107 @@ function renderSummary(d){
   const rPnl = d.totalRealizedPnl || d.totalPnl || 0;
   const uPnl = d.totalUnrealizedPnl || 0;
   const tPnl = d.totalPnl || 0;
+  const recon = d.reconciliation || null;
+  const reconStatus = recon ? String(recon.status || 'yellow').toLowerCase() : 'yellow';
+  const reconColor = reconStatus === 'green' ? 'var(--green)' : (reconStatus === 'red' ? 'var(--red)' : 'var(--yellow)');
+  const reconText = recon ? reconStatus.toUpperCase() : 'UNKNOWN';
+  const reconCounts = recon
+    ? (recon.greenWallets+'G / '+recon.yellowWallets+'Y / '+recon.redWallets+'R')
+    : 'n/a';
+
   $('#summary').innerHTML=
     '<div class="s-card"><div class="label">Active Wallets</div><div class="value">'+d.activeWallets+'</div></div>'+
     '<div class="s-card"><div class="label">Total Capital</div><div class="value">$'+fmt(d.totalCapital,0)+'</div></div>'+
     '<div class="s-card"><div class="label">Realized PnL</div><div class="value '+pnlCls(rPnl)+'">$'+fmt(rPnl)+'</div></div>'+
     '<div class="s-card"><div class="label">Unrealized PnL</div><div class="value '+pnlCls(uPnl)+'">$'+fmt(uPnl)+'</div></div>'+
     '<div class="s-card"><div class="label">Total PnL</div><div class="value '+pnlCls(tPnl)+'">$'+fmt(tPnl)+'</div></div>'+
-    '<div class="s-card"><div class="label">Engine Status</div><div class="value" style="font-size:16px;color:var(--green)">RUNNING</div></div>';
+    '<div class="s-card" style="cursor:pointer" onclick="toggleReconciliationPanel()" title="Click to expand reconciliation panel"><div class="label">Reconciliation</div><div class="value" style="font-size:16px;color:'+reconColor+'">'+reconText+'</div><div style="font-size:11px;color:var(--muted)">'+reconCounts+'</div></div>';
+}
+
+function toggleReconciliationPanel(){
+  const panel=document.getElementById('recon-panel');
+  if(!panel)return;
+  const hidden=panel.style.display==='none'||!panel.style.display;
+  panel.style.display=hidden?'block':'none';
+  if(hidden) loadReconciliationPanel();
+}
+
+async function loadReconciliationPanel(){
+  const container=document.getElementById('recon-panel-content');
+  if(!container)return;
+  container.innerHTML='<div style="color:var(--muted);font-size:13px;padding:8px 0">Loading reconciliation data…</div>';
+  try{
+    const r=await fetch('/api/system/reconciliation?history=true&limit=5');
+    if(!r.ok){container.innerHTML='<div style="color:var(--red)">Failed to load ('+r.status+')</div>';return}
+    const d=await r.json();
+    const latest=d.latest||null;
+    const unresolved=d.unresolvedExits||[];
+    let h='';
+
+    if(!latest){
+      h='<div style="color:var(--muted);font-size:13px;padding:8px 0">No reconciliation report available. Reconciliation runs on live startup.</div>';
+    } else {
+      const sColor=latest.status==='green'?'var(--green)':latest.status==='red'?'var(--red)':'var(--yellow)';
+      h+='<div style="display:flex;align-items:center;gap:16px;margin-bottom:12px">'+
+        '<div style="font-size:24px;font-weight:700;color:'+sColor+'">'+latest.status.toUpperCase()+'</div>'+
+        '<div style="font-size:12px;color:var(--muted)">'+
+          'Completed: '+latest.completedAt.slice(0,16)+' UTC<br>'+
+          latest.summary.greenWallets+'G / '+latest.summary.yellowWallets+'Y / '+latest.summary.redWallets+'R of '+latest.summary.totalWallets+' wallets'+
+        '</div>'+
+      '</div>';
+
+      /* Per-wallet drill-down */
+      if(latest.wallets&&latest.wallets.length>0){
+        h+='<table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:12px">'+
+          '<thead><tr>'+
+          '<th style="text-align:left;padding:5px 8px;color:var(--muted);border-bottom:1px solid var(--border)">Wallet</th>'+
+          '<th style="padding:5px 8px;color:var(--muted);border-bottom:1px solid var(--border)">Mode</th>'+
+          '<th style="padding:5px 8px;color:var(--muted);border-bottom:1px solid var(--border)">Status</th>'+
+          '<th style="padding:5px 8px;color:var(--muted);border-bottom:1px solid var(--border)">Local Open</th>'+
+          '<th style="padding:5px 8px;color:var(--muted);border-bottom:1px solid var(--border)">Ledger Open</th>'+
+          '<th style="padding:5px 8px;color:var(--muted);border-bottom:1px solid var(--border)">Ex. Orders</th>'+
+          '<th style="padding:5px 8px;color:var(--muted);border-bottom:1px solid var(--border)">Ex. Balance</th>'+
+          '<th style="padding:5px 8px;color:var(--muted);border-bottom:1px solid var(--border)">Notes</th>'+
+          '</tr></thead><tbody>';
+        for(const w of latest.wallets){
+          const wColor=w.status==='green'?'var(--green)':w.status==='red'?'var(--red)':'var(--yellow)';
+          const notesTxt=(w.notes||[]).join('; ')||'—';
+          h+='<tr>'+
+            '<td style="padding:5px 8px;font-family:monospace;font-size:11px">'+w.walletId+'</td>'+
+            '<td style="padding:5px 8px;text-align:center"><span class="badge badge-'+w.mode+'">'+w.mode+'</span></td>'+
+            '<td style="padding:5px 8px;text-align:center;font-weight:700;color:'+wColor+'">'+w.status.toUpperCase()+'</td>'+
+            '<td style="padding:5px 8px;text-align:right">'+(w.localOpenPositions??'—')+'</td>'+
+            '<td style="padding:5px 8px;text-align:right">'+(w.ledgerOpenPositions??'—')+'</td>'+
+            '<td style="padding:5px 8px;text-align:right">'+(w.exchangeOpenOrders??'—')+'</td>'+
+            '<td style="padding:5px 8px;text-align:right">'+(w.exchangeBalanceUsd!=null?'$'+Number(w.exchangeBalanceUsd).toFixed(2):'—')+'</td>'+
+            '<td style="padding:5px 8px;font-size:11px;color:var(--muted)">'+notesTxt+'</td>'+
+            '</tr>';
+        }
+        h+='</tbody></table>';
+      }
+    }
+
+    /* Unresolved exits */
+    if(unresolved.length>0){
+      h+='<div style="background:rgba(255,77,106,.07);border:1px solid rgba(255,77,106,.2);border-radius:6px;padding:10px 12px;margin-top:8px">'+
+        '<div style="font-size:11px;font-weight:700;color:var(--red);letter-spacing:.6px;margin-bottom:6px">⚠ UNRESOLVED EXITS ('+unresolved.length+')</div>'+
+        '<div style="font-size:11px;color:var(--muted)">'+unresolved.slice(0,8).map(u=>u.wallet_id+' '+u.market_id.slice(0,10)+'… '+u.outcome+' ×'+Number(u.size).toFixed(3)+' ['+u.exit_reason+']').join('<br>')+(unresolved.length>8?' … and '+(unresolved.length-8)+' more':'')+'</div>'+
+        '</div>';
+    }
+
+    container.innerHTML=h;
+  }catch(e){
+    container.innerHTML='<div style="color:var(--red)">Error loading reconciliation: '+String(e)+'</div>';
+  }
+}
+
+function renderReconciliationPanel(recon){
+  /* Update the inline summary card color but don't auto-expand the panel */
+  const panel=document.getElementById('recon-panel');
+  if(panel&&panel.style.display==='block'){
+    /* Panel is open — refresh its content */
+    loadReconciliationPanel();
+  }
 }
 
 function renderExecutionHealth(exec){
@@ -1227,6 +1328,13 @@ function renderWallets(wl){
     const toggleCls = isPaused ? 'paused' : 'running';
     const toggleLabel = isPaused ? '\u25B6 Start' : '\u23F8 Running';
     const dName = w.displayName || w.walletId;
+    const reconStatus = w.reconciliationStatus || null;
+    const reconBadge = reconStatus
+      ? ('<span style="font-size:10px;font-weight:700;padding:3px 7px;border-radius:4px;background:'+
+          (reconStatus==='green'?'rgba(0,214,143,.12)':reconStatus==='red'?'rgba(255,77,106,.12)':'rgba(255,193,7,.12)')+
+          ';color:'+(reconStatus==='green'?'var(--green)':reconStatus==='red'?'var(--red)':'var(--yellow)')+
+          ';text-transform:uppercase;letter-spacing:.4px">'+reconStatus+'</span>')
+      : '';
 
     /* ── Top 10 positions by total PnL ── */
     let posHtml='';
@@ -1250,7 +1358,7 @@ function renderWallets(wl){
     }
 
     return '<div class="w-card" style="cursor:pointer" onclick="openWalletDetail(\\''+w.walletId+'\\')" title="Click for detailed analytics">'+
-      '<div class="w-hdr"><div class="w-left"><span class="w-id">'+dName+'</span><span class="w-strat">'+w.strategy+'</span></div><div style="display:flex;align-items:center;gap:8px"><button class="toggle-btn '+toggleCls+'" onclick="event.stopPropagation();toggleWallet(\\''+w.walletId+'\\','+isPaused+')" title="'+(isPaused?'Start':'Pause')+' this wallet"><span class="toggle-dot"></span>'+toggleLabel+'</button><span class="badge badge-'+w.mode+'">'+w.mode+'</span></div></div>'+
+      '<div class="w-hdr"><div class="w-left"><span class="w-id">'+dName+'</span><span class="w-strat">'+w.strategy+'</span>'+reconBadge+'</div><div style="display:flex;align-items:center;gap:8px"><button class="toggle-btn '+toggleCls+'" onclick="event.stopPropagation();toggleWallet(\\''+w.walletId+'\\','+isPaused+')" title="'+(isPaused?'Start':'Pause')+' this wallet"><span class="toggle-dot"></span>'+toggleLabel+'</button><span class="badge badge-'+w.mode+'">'+w.mode+'</span></div></div>'+
       '<div class="w-body"><div class="m-row">'+
       '<div class="m-cell"><div class="m-label">Capital</div><div class="m-val">$'+fmt(w.capitalAllocated,0)+'</div></div>'+
       '<div class="m-cell"><div class="m-label">Available</div><div class="m-val">$'+fmt(w.availableBalance,0)+'</div></div>'+
@@ -1342,6 +1450,8 @@ function renderWalletDetail(d){
     '<button class="wd-tab'+(wdActiveTab==='overview'?' active':'')+'" data-tab="overview" onclick="switchWdTab(\\'overview\\')">Overview</button>'+
     '<button class="wd-tab'+(wdActiveTab==='positions'?' active':'')+'" data-tab="positions" onclick="switchWdTab(\\'positions\\')">Positions ('+w.openPositions.length+')</button>'+
     '<button class="wd-tab'+(wdActiveTab==='trades'?' active':'')+'" data-tab="trades" onclick="switchWdTab(\\'trades\\')">Trade History ('+d.tradeHistory.length+')</button>'+
+    '<button class="wd-tab'+(wdActiveTab==='lifecycle'?' active':'')+'" data-tab="lifecycle" onclick="switchWdTab(\\'lifecycle\\');loadWalletLifecycle(\\''+w.walletId+'\\')">Lifecycle</button>'+
+    '<button class="wd-tab'+(wdActiveTab==='execution'?' active':'')+'" data-tab="execution" onclick="switchWdTab(\\'execution\\');loadWalletExecutionTimeline(\\''+w.walletId+'\\')">Execution</button>'+
     '<button class="wd-tab'+(wdActiveTab==='settings'?' active':'')+'" data-tab="settings" onclick="switchWdTab(\\'settings\\')">Settings</button>'+
     '</div>';
 
@@ -1495,6 +1605,16 @@ function renderWalletDetail(d){
 
   html+='</div>'; /* /settings */
 
+  /* ═══ TAB: Lifecycle ═══ */
+  html+='<div id="wdp-lifecycle" class="wd-tab-panel'+(wdActiveTab==='lifecycle'?' active':'')+'" style="padding:16px">'+
+    '<div id="wdp-lifecycle-content"><div style="color:var(--muted);font-size:13px;padding:24px 0">Click the Lifecycle tab to load position history.</div></div>'+
+    '</div>';
+
+  /* ═══ TAB: Execution ═══ */
+  html+='<div id="wdp-execution" class="wd-tab-panel'+(wdActiveTab==='execution'?' active':'')+'" style="padding:16px">'+
+    '<div id="wdp-execution-content"><div style="color:var(--muted);font-size:13px;padding:24px 0">Click the Execution tab to load order/fill timeline.</div></div>'+
+    '</div>';
+
   /* Preserve editable settings field values and focused element across re-renders
      so the 2s auto-refresh does not wipe out what the user is typing. */
   const _sfIds=['ws-display-name','ws-rl-maxPositionSize','ws-rl-maxExposurePerMarket','ws-rl-maxDailyLoss','ws-rl-maxOpenTrades','ws-rl-maxDrawdown'];
@@ -1521,6 +1641,10 @@ function renderWalletDetail(d){
       const el=document.getElementById('wd-dd-chart');
       if(el) el.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--muted);font-size:12px">No trade data yet</div>';
     }
+  }
+
+  if(wdActiveTab==='execution'){
+    void loadWalletExecutionTimeline(w.walletId);
   }
 }
 
@@ -1650,8 +1774,301 @@ async function resetWalletLegacy(walletId){
   }
 }
 
-function showWsMsg(id,type,msg){
-  const el=document.getElementById(id);
+async function loadWalletLifecycle(walletId){
+  const container=document.getElementById('wdp-lifecycle-content');
+  if(!container)return;
+  container.innerHTML='<div style="color:var(--muted);font-size:13px;padding:12px 0">Loading lifecycle…</div>';
+  try{
+    const r=await fetch('/api/wallets/'+encodeURIComponent(walletId)+'/lifecycle?limit=200');
+    if(!r.ok){container.innerHTML='<div style="color:var(--red)">Failed to load lifecycle data ('+r.status+')</div>';return}
+    const d=await r.json();
+    const rows=d.rows||[];
+    const open=d.openPositions||[];
+    const unresolved=d.unresolvedExits||[];
+
+    const etColor={entry_open:'var(--green)',scale_in:'#7ecfff',partial_exit:'var(--yellow)',flat:'var(--muted)',exit_failed:'var(--red)'};
+    const etLabel={entry_open:'ENTRY','scale_in':'SCALE IN','partial_exit':'PARTIAL EXIT',flat:'FLAT',exit_failed:'EXIT FAILED'};
+
+    let h='';
+
+    /* Open positions per lifecycle */
+    if(open.length>0){
+      h+='<div style="margin-bottom:16px"><div style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.6px;margin-bottom:6px;text-transform:uppercase">Open Positions (Lifecycle)</div>'+
+        '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">';
+      for(const p of open){
+        h+='<div style="background:var(--card-bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px">'+
+          '<div style="font-size:11px;color:var(--muted);font-family:monospace">'+(p.market_id.slice(0,20))+'…</div>'+
+          '<div style="display:flex;gap:6px;align-items:center;margin-top:4px">'+
+          '<span class="o-'+p.outcome+'" style="font-size:11px;font-weight:700">'+p.outcome+'</span>'+
+          '<span style="font-size:12px">×'+Number(p.net_size).toFixed(4)+'</span>'+
+          '</div>'+
+          '<div style="font-size:10px;color:var(--muted);margin-top:2px">last: '+p.last_event.slice(0,16)+'</div>'+
+          '</div>';
+      }
+      h+='</div></div>';
+    }
+
+    /* Unresolved exits */
+    if(unresolved.length>0){
+      h+='<div style="margin-bottom:16px;background:rgba(255,77,106,.07);border:1px solid rgba(255,77,106,.2);border-radius:6px;padding:12px">'+
+        '<div style="font-size:11px;font-weight:700;color:var(--red);letter-spacing:.6px;margin-bottom:8px;text-transform:uppercase">⚠ Unresolved Exits ('+unresolved.length+')</div>'+
+        '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>'+
+        '<th style="text-align:left;padding:4px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Market</th>'+
+        '<th style="padding:4px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Outcome</th>'+
+        '<th style="padding:4px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Size</th>'+
+        '<th style="padding:4px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Reason</th>'+
+        '<th style="padding:4px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">At</th>'+
+        '</tr></thead><tbody>';
+      for(const u of unresolved){
+        h+='<tr>'+
+          '<td style="padding:4px 8px;font-family:monospace;font-size:11px">'+u.market_id.slice(0,18)+'…</td>'+
+          '<td style="padding:4px 8px;text-align:center"><span class="o-'+u.outcome+'">'+u.outcome+'</span></td>'+
+          '<td style="padding:4px 8px;text-align:right">'+Number(u.size).toFixed(4)+'</td>'+
+          '<td style="padding:4px 8px;color:var(--yellow)">'+u.exit_reason+'</td>'+
+          '<td style="padding:4px 8px;color:var(--muted);font-size:11px">'+u.created_at.slice(0,16)+'</td>'+
+          '</tr>';
+      }
+      h+='</tbody></table></div>';
+    }
+
+    /* Lifecycle event timeline */
+    h+='<div style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.6px;margin-bottom:8px;text-transform:uppercase">Position Timeline ('+rows.length+' events)</div>';
+    if(rows.length===0){
+      h+='<div style="color:var(--muted);font-size:13px;padding:16px 0">No lifecycle events recorded yet. Events appear after fills are confirmed.</div>';
+    } else {
+      h+='<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>'+
+        '<th style="text-align:left;padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Time</th>'+
+        '<th style="padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Event</th>'+
+        '<th style="padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Market</th>'+
+        '<th style="padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Outcome</th>'+
+        '<th style="padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Size</th>'+
+        '<th style="padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Price</th>'+
+        '<th style="padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Strategy</th>'+
+        '<th style="padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Exit Reason</th>'+
+        '</tr></thead><tbody>';
+      for(const row of rows){
+        const color=etColor[row.event_type]||'var(--fg)';
+        const label=etLabel[row.event_type]||row.event_type;
+        h+='<tr>'+
+          '<td style="padding:5px 8px;color:var(--muted);font-size:11px;white-space:nowrap">'+row.created_at.slice(0,16)+'</td>'+
+          '<td style="padding:5px 8px;text-align:center"><span style="font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px;color:'+color+';background:'+color.replace(')',',0.12)').replace('var(','rgba(').replace(',0.12)',',.12)')+'">'+label+'</span></td>'+
+          '<td style="padding:5px 8px;font-family:monospace;font-size:11px" title="'+row.market_id+'">'+row.market_id.slice(0,14)+'…</td>'+
+          '<td style="padding:5px 8px;text-align:center"><span class="o-'+row.outcome+'">'+row.outcome+'</span></td>'+
+          '<td style="padding:5px 8px;text-align:right">'+Number(row.size).toFixed(4)+'</td>'+
+          '<td style="padding:5px 8px;text-align:right">'+Number(row.price).toFixed(4)+'</td>'+
+          '<td style="padding:5px 8px;font-size:11px;color:var(--muted)">'+(row.strategy_name||'—')+'</td>'+
+          '<td style="padding:5px 8px;font-size:11px;color:var(--yellow)">'+(row.exit_reason||'—')+'</td>'+
+          '</tr>';
+      }
+      h+='</tbody></table></div>';
+    }
+
+    container.innerHTML=h;
+  }catch(e){
+    container.innerHTML='<div style="color:var(--red)">Error loading lifecycle: '+String(e)+'</div>';
+  }
+}
+
+async function loadWalletExecutionTimeline(walletId){
+  const container=document.getElementById('wdp-execution-content');
+  if(!container)return;
+  container.innerHTML='<div style="color:var(--muted);font-size:13px;padding:12px 0">Loading execution timeline…</div>';
+  try{
+    const [ledgerResp,lifeResp]=await Promise.all([
+      fetch('/api/execution/ledger?wallet_id='+encodeURIComponent(walletId)+'&limit=500'),
+      fetch('/api/wallets/'+encodeURIComponent(walletId)+'/lifecycle?limit=300'),
+    ]);
+    if(!ledgerResp.ok){container.innerHTML='<div style="color:var(--red)">Failed to load execution ledger ('+ledgerResp.status+')</div>';return}
+    const ledgerPayload=await ledgerResp.json();
+    const lifecyclePayload=lifeResp.ok?await lifeResp.json():{rows:[]};
+    const rows=ledgerPayload.rows||[];
+    const lifecycleRows=lifecyclePayload.rows||[];
+
+    const byIntent={};
+    for(const row of rows){
+      const id=row.intent_id||'unknown';
+      if(!byIntent[id]){
+        byIntent[id]={
+          intentId:id,
+          marketId:row.market_id||'',
+          outcome:row.outcome||'',
+          side:row.side||'',
+          strategy:row.strategy_name||'',
+          intendedQty:Number(row.size||0),
+          intendedPrice:Number(row.price||0),
+          submitStatus:'—',
+          lastEvent:'—',
+          fills:0,
+          fillQty:0,
+          fillNotional:0,
+          createdAt:row.created_at,
+          lastAt:row.created_at,
+        };
+      }
+      const chain=byIntent[id];
+      if(row.market_id&&!chain.marketId){chain.marketId=row.market_id;}
+      if(row.outcome&&!chain.outcome){chain.outcome=row.outcome;}
+      if(row.side&&!chain.side){chain.side=row.side;}
+      if(row.strategy_name&&!chain.strategy){chain.strategy=row.strategy_name;}
+      if(row.kind==='intent'){
+        chain.intendedQty=Number(row.size||chain.intendedQty||0);
+        chain.intendedPrice=Number(row.price||chain.intendedPrice||0);
+      }
+      if(row.kind==='submission'&&row.status){chain.submitStatus=row.status;}
+      if(row.kind==='event'&&row.event_type){chain.lastEvent=row.event_type;}
+      if(row.kind==='fill'){
+        chain.fills+=1;
+        const qty=Number(row.size||0);
+        const px=Number(row.price||0);
+        chain.fillQty+=qty;
+        chain.fillNotional+=qty*px;
+      }
+      if(row.created_at<chain.createdAt){chain.createdAt=row.created_at;}
+      if(row.created_at>chain.lastAt){chain.lastAt=row.created_at;}
+    }
+
+    const lifecycleByIntent={};
+    for(const lr of lifecycleRows){
+      const key=lr.intent_id||lr.parent_intent_id||'';
+      if(!key) continue;
+      const existing=lifecycleByIntent[key]||{event:'—',reason:'—',branch:'—'};
+      existing.event=lr.event_type||existing.event;
+      existing.reason=lr.exit_reason||existing.reason;
+      existing.branch=lr.notes||existing.branch;
+      lifecycleByIntent[key]=existing;
+    }
+
+    const toLc=v=>String(v||'').toLowerCase();
+    const short=(v,n)=>{
+      const s=String(v||'');
+      if(!s)return '—';
+      return s.length>n?s.slice(0,n)+'…':s;
+    };
+    const stateBadge=(state)=>{
+      const colorByState={
+        pending:'var(--yellow)',
+        partial:'var(--orange)',
+        filled:'var(--green)',
+        closed:'var(--accent)',
+        canceled:'var(--red)',
+        rejected:'var(--red)',
+        failed:'var(--red)',
+        timeout:'var(--red)',
+      };
+      const color=colorByState[state]||'var(--muted)';
+      return '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;color:'+color+';background:rgba(255,255,255,.06);text-transform:uppercase;letter-spacing:.4px">'+state+'</span>';
+    };
+    const classifyState=(chain,life)=>{
+      const submit=toLc(chain.submitStatus);
+      const event=toLc(chain.lastEvent);
+      const lifeEvent=toLc(life.event);
+      if(lifeEvent==='flat') return 'closed';
+      if(event.includes('timeout')||submit.includes('timeout')) return 'timeout';
+      if(event.includes('cancel')||submit.includes('cancel')) return 'canceled';
+      if(event.includes('rejected')||submit.includes('rejected')||event==='route_rejected') return 'rejected';
+      if(event.includes('failed')||submit.includes('failed')||event==='route_failed') return 'failed';
+      if(chain.fillQty>0&&chain.intendedQty>0&&chain.fillQty+1e-9<chain.intendedQty) return 'partial';
+      if(chain.fillQty>0&&(chain.intendedQty<=0||chain.fillQty+1e-9>=chain.intendedQty)) return 'filled';
+      return 'pending';
+    };
+
+    const chains=Object.values(byIntent).sort((a,b)=>String(b.lastAt).localeCompare(String(a.lastAt)));
+    const enriched=chains.map((chain)=>{
+      const life=lifecycleByIntent[chain.intentId]||{event:'—',reason:'—',branch:'—'};
+      const avgFillPx=chain.fillQty>0?(chain.fillNotional/chain.fillQty):null;
+      const hasSlip=avgFillPx!=null&&chain.intendedPrice>0&&chain.fillQty>0;
+      const adverseMult=chain.side==='SELL'?-1:1;
+      const slippageBps=hasSlip?(((avgFillPx-chain.intendedPrice)/chain.intendedPrice)*10000*adverseMult):null;
+      const edgePerUnit=hasSlip?(chain.side==='SELL'?(avgFillPx-chain.intendedPrice):(chain.intendedPrice-avgFillPx)):null;
+      const edgeUsd=edgePerUnit!=null?(edgePerUnit*chain.fillQty):null;
+      const state=classifyState(chain,life);
+      return {chain,life,avgFillPx,slippageBps,edgeUsd,state};
+    });
+
+    let pendingCount=0;
+    let partialCount=0;
+    let closedCount=0;
+    let failCount=0;
+    let totalEdgeUsd=0;
+    let totalSlipWeight=0;
+    let weightedSlipSum=0;
+    for(const row of enriched){
+      if(row.state==='pending') pendingCount+=1;
+      if(row.state==='partial') partialCount+=1;
+      if(row.state==='closed') closedCount+=1;
+      if(row.state==='rejected'||row.state==='failed'||row.state==='timeout'||row.state==='canceled') failCount+=1;
+      if(row.edgeUsd!=null) totalEdgeUsd+=row.edgeUsd;
+      if(row.slippageBps!=null&&row.chain.fillQty>0){
+        weightedSlipSum+=row.slippageBps*row.chain.fillQty;
+        totalSlipWeight+=row.chain.fillQty;
+      }
+    }
+    const avgSlippageBps=totalSlipWeight>0?(weightedSlipSum/totalSlipWeight):null;
+
+    let h='';
+    h+='<div style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.6px;margin-bottom:8px;text-transform:uppercase">Execution Timeline ('+enriched.length+' intents)</div>';
+    if(enriched.length===0){
+      h+='<div style="color:var(--muted);font-size:13px;padding:16px 0">No execution ledger rows for this wallet.</div>';
+      container.innerHTML=h;
+      return;
+    }
+
+    h+='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:12px">'+
+      '<div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px"><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">Pending</div><div style="font-size:18px;font-weight:700;color:var(--yellow)">'+pendingCount+'</div></div>'+
+      '<div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px"><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">Partial</div><div style="font-size:18px;font-weight:700;color:var(--orange)">'+partialCount+'</div></div>'+
+      '<div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px"><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">Closed</div><div style="font-size:18px;font-weight:700;color:var(--accent)">'+closedCount+'</div></div>'+
+      '<div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px"><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">Rejected/Failed</div><div style="font-size:18px;font-weight:700;color:var(--red)">'+failCount+'</div></div>'+
+      '<div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px"><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">Avg Slippage (bps)</div><div style="font-size:18px;font-weight:700" class="'+pnlCls(-(avgSlippageBps||0))+'">'+(avgSlippageBps!=null?fmt(avgSlippageBps,1):'—')+'</div></div>'+
+      '<div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px"><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">Execution Edge ($)</div><div style="font-size:18px;font-weight:700" class="'+pnlCls(totalEdgeUsd)+'">'+fmt(totalEdgeUsd,2)+'</div></div>'+
+    '</div>';
+
+    h+='<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>'+
+      '<th style="text-align:left;padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Intent</th>'+
+      '<th style="padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">State</th>'+
+      '<th style="padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Market</th>'+
+      '<th style="padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Side</th>'+
+      '<th style="padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Submit</th>'+
+      '<th style="padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Event</th>'+
+      '<th style="padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Fills</th>'+
+      '<th style="padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Intent Px</th>'+
+      '<th style="padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Avg Fill Px</th>'+
+      '<th style="padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Slip bps</th>'+
+      '<th style="padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Edge $</th>'+
+      '<th style="padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Close Event</th>'+
+      '<th style="padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Exit Reason</th>'+
+      '<th style="padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Policy Branch</th>'+
+      '<th style="padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border)">Last Update</th>'+
+      '</tr></thead><tbody>';
+
+    for(const row of enriched){
+      const chain=row.chain;
+      const life=row.life;
+      h+='<tr>'+
+        '<td style="padding:5px 8px;font-family:monospace;font-size:11px">'+short(chain.intentId,14)+'</td>'+
+        '<td style="padding:5px 8px;text-align:center">'+stateBadge(row.state)+'</td>'+
+        '<td style="padding:5px 8px;font-family:monospace;font-size:11px" title="'+escHtml(chain.marketId)+'">'+short(chain.marketId,12)+'</td>'+
+        '<td style="padding:5px 8px;text-align:center">'+(chain.side||'—')+' '+(chain.outcome||'')+'</td>'+
+        '<td style="padding:5px 8px;text-align:center">'+chain.submitStatus+'</td>'+
+        '<td style="padding:5px 8px;text-align:center">'+chain.lastEvent+'</td>'+
+        '<td style="padding:5px 8px;text-align:right">'+chain.fills+' / '+Number(chain.fillQty).toFixed(3)+'</td>'+
+        '<td style="padding:5px 8px;text-align:right">'+(chain.intendedPrice>0?fmt(chain.intendedPrice,4):'—')+'</td>'+
+        '<td style="padding:5px 8px;text-align:right">'+(row.avgFillPx!=null?fmt(row.avgFillPx,4):'—')+'</td>'+
+        '<td style="padding:5px 8px;text-align:right" class="'+pnlCls(-(row.slippageBps||0))+'">'+(row.slippageBps!=null?fmt(row.slippageBps,1):'—')+'</td>'+
+        '<td style="padding:5px 8px;text-align:right" class="'+pnlCls(row.edgeUsd||0)+'">'+(row.edgeUsd!=null?fmt(row.edgeUsd,4):'—')+'</td>'+
+        '<td style="padding:5px 8px;text-align:center">'+life.event+'</td>'+
+        '<td style="padding:5px 8px;color:var(--yellow)">'+life.reason+'</td>'+
+        '<td style="padding:5px 8px;color:var(--muted);font-size:11px">'+escHtml(life.branch||'—')+'</td>'+
+        '<td style="padding:5px 8px;color:var(--muted);font-size:11px;white-space:nowrap">'+String(chain.lastAt||'').slice(0,16)+'</td>'+
+      '</tr>';
+    }
+    h+='</tbody></table></div>';
+    container.innerHTML=h;
+  }catch(e){
+    container.innerHTML='<div style="color:var(--red)">Error loading execution timeline: '+String(e)+'</div>';
+  }
+}
+
+function showWsMsg(id,type,msg){  const el=document.getElementById(id);
   if(!el)return;
   el.textContent=msg;
   el.className='ws-msg '+type;
@@ -3418,6 +3835,7 @@ async function fetchDashboardData(){
     $('#hdr-ts').textContent = new Date(d.generatedAt).toLocaleString();
     renderSummary(d);
     renderWallets(d.wallets);
+    renderReconciliationPanel(d.reconciliation);
     void fetchRuntimeCounters();
   }catch(e){console.error('fetchDashboardData error',e)}
 }
@@ -3438,6 +3856,7 @@ function connectSSE(){
         $('#hdr-ts').textContent = new Date(d.generatedAt).toLocaleString();
         renderSummary(d);
         renderWallets(d.wallets);
+        renderReconciliationPanel(d.reconciliation);
       }catch(e){console.error('SSE parse error',e)}
     });
     sse.onerror = function(){
