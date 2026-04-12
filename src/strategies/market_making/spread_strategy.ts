@@ -11,6 +11,7 @@ import { logger } from '../../reporting/logs';
    • Position limits per market & total
    • Adverse selection protection (skip after spikes)
    • Mean-reversion fade for inventory management
+   • FEE-AWARE: Requires 50 bps spread to cover 40 bps roundtrip fees + profit
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
 interface Inventory {
@@ -36,8 +37,8 @@ export class SpreadStrategy extends BaseStrategy {
   /* ── Configuration ── */
   private minVolume = 1_500;
   private minLiquidity = 300;
-  private minSpread = 0.002;        // 20 bps minimum spread to be profitable
-  private maxInventoryPerMarket = 60; // max shares per side per market
+  private minSpread = 0.005;        // 50 bps minimum spread (covers 40 bps roundtrip fees + 10 bps profit)
+  private maxInventoryPerMarket = 20; // reduced from 60 to minimize market impact slippage
   private maxTotalMarkets = 12;       // max number of markets to quote
   private inventorySkewFactor = 0.3;  // how much to skew quotes with inventory
   private volSpreadMultiplier = 2.0;  // widen spread with volatility
@@ -93,10 +94,16 @@ export class SpreadStrategy extends BaseStrategy {
       const netInventory = inv.yesShares - inv.noShares; // positive = long YES
       const halfSpread = spread / 2;
 
+      // Account for exchange fees: 0.2% per fill, so 0.4% roundtrip
+      // Only post edge if > fees + buffer
+      const feesPerRoundtrip = 0.004; // 40 bps both directions
+      const netSpreadAfterFees = spread - feesPerRoundtrip;
+      if (netSpreadAfterFees < 0.001) continue; // Not profitable after fees
+
       // Skew: if we're long YES, make YES-buy less aggressive and YES-sell more aggressive
       const skew = netInventory * this.inventorySkewFactor * 0.001;
-      const buyEdge = halfSpread * 0.6 - skew;   // reduce buy edge when long
-      const sellEdge = halfSpread * 0.6 + skew;   // increase sell edge when long
+      const buyEdge = Math.max(0, halfSpread * 0.6 - skew - feesPerRoundtrip / 2);   // reduce buy edge when long, account for fees
+      const sellEdge = Math.max(0, halfSpread * 0.6 + skew - feesPerRoundtrip / 2);   // increase sell edge when long, account for fees
 
       /* Only quote buy side if not maxed out on inventory */
       if (inv.yesShares < this.maxInventoryPerMarket && buyEdge > 0.001) {

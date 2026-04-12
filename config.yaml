@@ -43,7 +43,10 @@ strategy_config:
   ai_forecast:
     refresh_minutes: 30
   market_making:
-    spread_bps: 40
+    # ── FEE-AWARE: Polymarket charges 0.2% per fill (40 bps roundtrip)
+    # Strategy requires 50+ bps spread to be profitable after fees
+    # Config applies at runtime: minSpread=0.005, maxInventory=20 per market
+    spread_bps: 50  # Changed from 40 to reflect fee-aware minimum
   momentum:
     lookback_minutes: 15
   filtered_high_prob_convergence:

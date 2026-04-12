@@ -124,7 +124,11 @@ export class PaperWallet {
     const pnl = this.pnlTracker.recordFill(fill, position, entryPrice);
     this.state.realizedPnl += pnl.realized;
     const cost = fill.price * fill.size * (fill.side === 'BUY' ? 1 : -1);
+    
+    // Deduct both position cost and exchange fees
+    const feeDeductionUsd = (fill as any).feeUsd ?? 0;
     this.state.availableBalance -= cost;
+    this.state.availableBalance -= feeDeductionUsd;
 
     this.trades.push({
       orderId: fill.orderId,
@@ -155,7 +159,7 @@ export class PaperWallet {
       `${this.state.walletId} PAPER fill ${fill.side} ${fill.outcome} market=${fill.marketId} price=${fill.price} size=${fill.size}`,
     );
 
-    consoleLog.success('FILL', `[${this.state.walletId}] ${fill.side} ${fill.outcome} ×${fill.size} @ $${fill.price} → PnL $${pnl.realized.toFixed(2)} | Bal $${this.state.availableBalance.toFixed(2)}`, {
+    consoleLog.success('FILL', `[${this.state.walletId}] ${fill.side} ${fill.outcome} ×${fill.size} @ $${fill.price} → PnL $${pnl.realized.toFixed(2)} | Fee $${feeDeductionUsd.toFixed(2)} | Bal $${this.state.availableBalance.toFixed(2)}`, {
       walletId: this.state.walletId,
       strategy: this.state.assignedStrategy,
       orderId: fill.orderId,
@@ -165,6 +169,7 @@ export class PaperWallet {
       price: fill.price,
       size: fill.size,
       cost: Math.abs(cost),
+      feeUsd: feeDeductionUsd,
       realizedPnl: Number(pnl.realized.toFixed(4)),
       cumulativePnl: Number(this.state.realizedPnl.toFixed(4)),
       balanceAfter: Number(this.state.availableBalance.toFixed(2)),
